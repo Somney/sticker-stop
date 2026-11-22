@@ -105,7 +105,7 @@ export function buildSticker(frame, opts) {
   // Clip art to the cut shape (removes faint fringe that would print outside the cut line).
   const artLayer = document.createElement('canvas');
   artLayer.width = W; artLayer.height = H;
-  const actx = artLayer.getContext('2d');
+  const actx = artLayer.getContext('2d', { willReadFrequently: true });
   actx.putImageData(art, 0, 0);
   actx.globalCompositeOperation = 'destination-in';
   actx.drawImage(c, 0, 0);
@@ -152,6 +152,6 @@ export function trim(c) {
   const t = document.createElement('canvas');
   t.width = maxX - minX + 1;
   t.height = maxY - minY + 1;
-  t.getContext('2d').drawImage(c, -minX, -minY);
+  t.getContext('2d', { willReadFrequently: true }).drawImage(c, -minX, -minY);
   return t;
 }

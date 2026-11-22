@@ -1,8 +1,8 @@
 // Service worker: makes Sticker Stop installable and usable offline.
-// App files: served from cache, refreshed in the background (stale-while-revalidate).
+// App files: network first so updates arrive right away; cached copy used when offline.
 // AI model + MediaPipe runtime: cached on first use so AI cutouts also work offline later.
 
-const VERSION = 'sticker-stop-v2';
+const VERSION = 'sticker-stop-v3';
 const SHELL = [
   './',
   'index.html',
@@ -58,16 +58,17 @@ self.addEventListener('fetch', (e) => {
   }
 
   if (url.origin !== self.location.origin) return;
+  // Network first (so updates show up immediately), cache as offline fallback.
   e.respondWith(
     caches.open(VERSION).then(async (cache) => {
-      const hit = await cache.match(req, { ignoreSearch: true });
-      const net = fetch(req)
-        .then((res) => {
-          if (res.ok) cache.put(req, res.clone());
-          return res;
-        })
-        .catch(() => hit || (req.mode === 'navigate' ? cache.match('index.html') : Response.error()));
-      return hit || net;
+      try {
+        const res = await fetch(req, { cache: 'no-cache' });
+        if (res.ok) cache.put(req, res.clone());
+        return res;
+      } catch {
+        const hit = await cache.match(req, { ignoreSearch: true });
+        return hit || (req.mode === 'navigate' ? cache.match('index.html') : Response.error());
+      }
     }),
   );
 });

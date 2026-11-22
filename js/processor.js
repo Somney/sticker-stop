@@ -1,7 +1,7 @@
 // Turns one raw video frame into a transparent cutout of the dancer.
 import { chromaKey, hexToRgb } from './keyer.js';
 import { segmentPerson } from './segmenter.js';
-import { distanceToForeground, removeSpecks, alphaBBox } from './mask.js';
+import { distanceToForeground, removeSpecks, alphaBBox, fillSmallHoles } from './mask.js';
 
 /**
  * settings: {
@@ -54,6 +54,14 @@ export async function cutoutFrame(src, settings) {
     for (let i = 0; i < n; i++) if (d[i] > 2) alpha[i] = 0;
   }
 
+  // Plug small holes inside the body (mask noise) so they can't print as blank patches.
+  const fg = new Uint8Array(n);
+  let area = 0;
+  for (let i = 0; i < n; i++) if (alpha[i] >= 128) { fg[i] = 1; area++; }
+  if (area) {
+    for (const p of fillSmallHoles(fg, w, h, Math.max(64, area * 0.02))) alpha[p] = 255;
+  }
+
   for (let i = 0; i < n; i++) data[i * 4 + 3] = alpha[i];
   const bbox = alphaBBox(data, w, h, 24);
   if (!bbox) return null;
@@ -61,14 +69,15 @@ export async function cutoutFrame(src, settings) {
   const out = document.createElement('canvas');
   out.width = bbox.w;
   out.height = bbox.h;
-  const octx = out.getContext('2d');
+  // willReadFrequently keeps this canvas in CPU memory (GPU canvases can be evicted on phones).
+  const octx = out.getContext('2d', { willReadFrequently: true });
   const crop = new ImageData(bbox.w, bbox.h);
   for (let y = 0; y < bbox.h; y++) {
     const s = ((bbox.y + y) * w + bbox.x) * 4;
     crop.data.set(data.subarray(s, s + bbox.w * 4), y * bbox.w * 4);
   }
   octx.putImageData(crop, 0, 0);
-  return { canvas: out, bbox, srcW: w, srcH: h };
+  return { canvas: out, bbox, srcW: w, srcH: h, area };
 }
 
 /** Draws a source (video/image/bitmap) into a working canvas, scaled so height <= maxH. */

@@ -124,3 +124,41 @@ export function alphaBBox(data, w, h, threshold = 0) {
   if (maxX < 0) return null;
   return { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
 }
+
+/**
+ * Fills enclosed background holes up to maxArea pixels (mask noise), but keeps big real gaps,
+ * like the space between an arm on a hip and the body. Mutates mask; returns filled pixel indices.
+ */
+export function fillSmallHoles(mask, w, h, maxArea) {
+  const seen = new Uint8Array(w * h);
+  const stack = new Int32Array(w * h);
+  const filled = [];
+  // Mark background connected to the image border.
+  let sp = 0;
+  const pushOut = (p) => { if (!mask[p] && !seen[p]) { seen[p] = 1; stack[sp++] = p; } };
+  for (let x = 0; x < w; x++) { pushOut(x); pushOut((h - 1) * w + x); }
+  for (let y = 0; y < h; y++) { pushOut(y * w); pushOut(y * w + w - 1); }
+  const flood = (collect) => {
+    while (sp) {
+      const p = stack[--sp];
+      if (collect) collect.push(p);
+      const x = p % w;
+      if (x > 0) pushOut(p - 1);
+      if (x < w - 1) pushOut(p + 1);
+      if (p >= w) pushOut(p - w);
+      if (p < w * (h - 1)) pushOut(p + w);
+    }
+  };
+  flood(null);
+  // Every remaining unseen background region is an enclosed hole.
+  for (let i = 0; i < mask.length; i++) {
+    if (mask[i] || seen[i]) continue;
+    const region = [];
+    seen[i] = 1; stack[sp++] = i;
+    flood(region);
+    if (region.length <= maxArea) {
+      for (const p of region) { mask[p] = 1; filled.push(p); }
+    }
+  }
+  return filled;
+}

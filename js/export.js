@@ -17,8 +17,10 @@ function crc32(bytes) {
 }
 
 /** Inserts a pHYs chunk so apps read the PNG at the right physical size. */
-export async function pngWithDpi(canvas, dpi = 300) {
-  const blob = await new Promise((r) => canvas.toBlob(r, 'image/png'));
+export async function pngWithDpi(canvasOrBlob, dpi = 300) {
+  const blob = canvasOrBlob instanceof Blob
+    ? canvasOrBlob
+    : await new Promise((r) => canvasOrBlob.toBlob(r, 'image/png'));
   const src = new Uint8Array(await blob.arrayBuffer());
   const ppm = Math.round(dpi / 0.0254);
   const chunk = new Uint8Array(21);

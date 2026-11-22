@@ -53,6 +53,12 @@
     <!-- Shared preview stage (Source / Cutout / Capture) -->
     <section class="stage" id="stage" aria-label="Preview">
       <div class="previews">
+        <div class="rec-overlay" id="recOverlay" aria-live="assertive">
+          <div class="ov-big" id="ovBig"></div>
+          <div class="ov-sub" id="ovSub"></div>
+          <div class="ov-bar hidden" id="ovBarWrap"><i id="ovBar"></i></div>
+        </div>
+        <div class="shutter-flash" id="shutterFlash"></div>
         <figure>
           <div class="canvas-wrap"><canvas id="origCanvas" width="320" height="180" title="Tap to pick the key colour"></canvas>
             <div class="empty-hint" id="stageEmpty">Add a video or start the camera</div>
@@ -171,9 +177,11 @@
         <div class="row">
           <label>Countdown <input type="number" id="countdown" min="0" max="30" value="3" /> s</label>
           <label>Record for <input type="number" id="recordSecs" min="1" max="120" value="5" /> s</label>
+          <label class="check"><input type="checkbox" id="soundCues" checked /> Beeps</label>
         </div>
+        <p class="hint">After you tap, a big countdown appears over the camera. Nothing is captured until it says <b>GO!</b> and beeps. Each photo flashes, and the cutting-out happens after recording stops.</p>
         <div class="row">
-          <button id="recordBtn" class="big rec" disabled>● Record &amp; auto-cut</button>
+          <button id="recordBtn" class="big rec" data-phase="idle" disabled>● Start recording</button>
           <button class="ghost" id="snapBtn" disabled>Snap 1 frame</button>
         </div>
       </div>
@@ -208,6 +216,7 @@
             <button class="ghost small" id="reprocessBtn" disabled>Re-cut all</button>
             <button class="ghost small" id="includeAllBtn" disabled>Include all</button>
             <button class="ghost small" id="everyOtherBtn" disabled>Halve frames</button>
+            <button class="ghost small hidden" id="skipOddBtn">Skip ⚠ frames</button>
             <button class="ghost small danger" id="clearBtn" disabled>Clear</button>
           </div>
           <div class="frames" id="frames"><p class="empty">No frames yet. Go to <b>Capture</b> to make some.</p></div>

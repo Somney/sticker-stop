@@ -16,7 +16,7 @@ const state = {
   stream: null,
   cancel: false,
   busy: false,
-  recording: false,
+  phase: 'idle', // live capture: 'idle' | 'countdown' | 'recording' | 'processing'
   stickers: null,
   layout: null,
   storageOk: true,
@@ -59,7 +59,7 @@ function confirmDialog(title, text, okLabel = 'Delete') {
 const SETTING_IDS = [
   'keyColor', 'tolerance', 'softness', 'spill', 'choke', 'procRes', 'cleanSpecks', 'mirror', 'livePreview',
   'fps', 'countdown', 'recordSecs', 'preset', 'customW', 'customH', 'orientation', 'figureH', 'borderW', 'gap',
-  'margin', 'borderColor', 'fillHoles', 'badgeShow', 'badgeCorner', 'badgeSize', 'badgeColor', 'playBg',
+  'margin', 'borderColor', 'fillHoles', 'badgeShow', 'badgeCorner', 'badgeSize', 'badgeColor', 'playBg', 'soundCues',
 ];
 function readSettings() {
   const s = { method: radio('method'), srcMode: radio('srcMode'), screen: state.screen };
@@ -149,7 +149,7 @@ async function persistOp(p) {
 async function saveFrame(f) {
   return persistOp(store.putFrame({
     id: f.id, raw: f.raw, cutPng: f.cutPng, include: f.include,
-    bbox: f.cut?.bbox || null, srcW: f.cut?.srcW || state.srcW, srcH: f.cut?.srcH || state.srcH,
+    bbox: f.cut?.bbox || null, srcW: f.cut?.srcW || state.srcW, srcH: f.cut?.srcH || state.srcH, area: f.cut?.area || 0,
   }));
 }
 
@@ -407,25 +407,44 @@ $('extractBtn').addEventListener('click', async () => {
 });
 $('cancelBtn').addEventListener('click', () => { state.cancel = true; });
 
-async function addFrame(srcCanvas, settings) {
-  const raw = await canvasToBlob(srcCanvas);
+async function addFrame(srcCanvas, settings, raw = null) {
+  raw = raw || (await canvasToBlob(srcCanvas));
   const work = document.createElement('canvas');
   work.width = srcCanvas.width; work.height = srcCanvas.height;
   work.getContext('2d', { willReadFrequently: true }).drawImage(srcCanvas, 0, 0);
-  let cut = null;
-  try { cut = await cutoutFrame(work, settings); } catch (e) { reportAiError(e); }
-  const f = { id: state.nextId++, raw, cut, cutPng: null, include: !!cut, thumb: null };
+  let res = null;
+  try { res = await cutoutFrame(work, settings); } catch (e) { reportAiError(e); }
+  const f = { id: state.nextId++, raw, cut: null, cutPng: null, include: !!res, thumb: null };
   state.srcW = srcCanvas.width; state.srcH = srcCanvas.height;
   state.frames.push(f);
-  await setCutPng(f);
+  await setCut(f, res);
   saveFrame(f);
   renderFrames();
   return f;
 }
-async function setCutPng(f) {
+/**
+ * Stores a cutout as a compact PNG blob + metadata. We deliberately don't keep hundreds of canvases
+ * alive: on phones the browser can silently drop canvas memory, which corrupts the stickers.
+ */
+async function setCut(f, res) {
   if (f.thumb) URL.revokeObjectURL(f.thumb);
-  f.cutPng = f.cut ? await canvasToBlob(f.cut.canvas, 'image/png') : null;
+  imgCache.delete(f.id);
+  f.cut = res ? { bbox: res.bbox, srcW: res.srcW, srcH: res.srcH, area: res.area } : null;
+  f.cutPng = res ? await canvasToBlob(res.canvas, 'image/png') : null;
   f.thumb = f.cutPng ? URL.createObjectURL(f.cutPng) : null;
+}
+const imgCache = new Map();
+function frameImg(f) {
+  let img = imgCache.get(f.id);
+  if (!img) {
+    img = new Image();
+    img.src = f.thumb;
+    imgCache.set(f.id, img);
+  }
+  return img;
+}
+async function preloadImgs(frames) {
+  await Promise.all(frames.map((f) => frameImg(f).decode().catch(() => {})));
 }
 
 // ---------- live camera ----------
@@ -467,8 +486,7 @@ async function startCamera() {
   cam.srcObject = state.stream;
   await cam.play();
   await listCameras();
-  $('recordBtn').disabled = false;
-  $('snapBtn').disabled = false;
+  setPhase('idle', '● Start recording');
   $('camStart').textContent = 'Restart camera';
   $('liveStatus').textContent = 'Camera on. Step back so your whole body is in the frame.';
   if (!liveLoopOn) liveLoop();
@@ -476,6 +494,7 @@ async function startCamera() {
 function stopCamera() {
   state.stream?.getTracks().forEach((t) => t.stop());
   state.stream = null;
+  if (state.phase === 'countdown' || state.phase === 'recording') state.cancel = true;
   $('recordBtn').disabled = true;
   $('snapBtn').disabled = true;
   $('camStart').textContent = 'Start camera';
@@ -486,77 +505,151 @@ $('camSelect').addEventListener('change', () => state.stream && startCamera());
 async function liveLoop() {
   liveLoopOn = true;
   while (state.stream && state.mode === 'live' && STAGE_SCREENS.has(state.screen) && !document.hidden) {
-    if (!state.recording) {
+    if (state.phase === 'idle' || state.phase === 'countdown') {
       const c = grabFrame(cam, Math.min(480, procRes()), $('mirror').checked);
-      if ($('livePreview').checked) await renderPreview(c);
-      else {
-        const o = $('origCanvas');
-        o.width = c.width; o.height = c.height;
-        o.getContext('2d').drawImage(c, 0, 0);
-        previewSource = c;
-        $('stageEmpty').classList.add('hidden');
-      }
+      // During the countdown show the plain camera (fast + smooth) so you can see yourself get in place.
+      if ($('livePreview').checked && state.phase === 'idle') await renderPreview(c);
+      else showRaw(c);
     }
-    await sleep(30);
+    await sleep(state.phase === 'countdown' ? 16 : 30);
   }
   liveLoopOn = false;
+}
+function showRaw(c) {
+  const o = $('origCanvas');
+  o.width = c.width; o.height = c.height;
+  o.getContext('2d').drawImage(c, 0, 0);
+  previewSource = c;
+  $('stageEmpty').classList.add('hidden');
 }
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden && state.stream && state.mode === 'live' && !liveLoopOn) liveLoop();
 });
 
 $('snapBtn').addEventListener('click', async () => {
+  flash();
+  beep(1320, 0.06);
   const c = grabFrame(cam, procRes(), $('mirror').checked);
   await addFrame(c, cutSettings());
   rebuildSheets();
   toast(`Frame ${state.frames.length} captured`);
 });
 
-$('recordBtn').addEventListener('click', async () => {
-  if (state.recording) { state.cancel = true; return; }
-  const secs = +$('recordSecs').value || 5;
-  const count = +$('countdown').value || 0;
-  const status = $('estimate');
+// --- recording feedback: big on-screen overlay, button states, sound + vibration cues ---
+let audioCtx = null;
+function beep(freq = 880, dur = 0.12) {
+  if (!$('soundCues').checked) return;
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.frequency.value = freq;
+    o.connect(g); g.connect(audioCtx.destination);
+    const t = audioCtx.currentTime;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.25, t + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.start(t); o.stop(t + dur + 0.02);
+  } catch { /* audio is optional */ }
+}
+const buzz = (p) => { try { navigator.vibrate?.(p); } catch { /* optional */ } };
+function flash() {
+  const f = $('shutterFlash');
+  f.classList.remove('go');
+  void f.offsetWidth; // restart animation
+  f.classList.add('go');
+}
+function overlay(phase, big = '', sub = '', progress = null) {
+  const ov = $('recOverlay');
+  ov.className = 'rec-overlay' + (phase ? ` show ${phase}` : '');
+  $('ovBig').textContent = big;
+  $('ovSub').textContent = sub;
+  $('ovBar').style.width = progress == null ? '0%' : `${Math.round(progress * 100)}%`;
+  $('ovBarWrap').classList.toggle('hidden', progress == null);
+}
+function setPhase(phase, label) {
+  state.phase = phase;
   const btn = $('recordBtn');
+  btn.dataset.phase = phase;
+  btn.disabled = phase === 'processing' || !state.stream;
+  btn.textContent = label;
+  $('snapBtn').disabled = phase !== 'idle' || !state.stream;
+  $('recDot').classList.toggle('hidden', phase !== 'recording');
+}
+
+$('recordBtn').addEventListener('click', async () => {
+  if (state.phase === 'countdown' || state.phase === 'recording') { state.cancel = true; return; }
+  if (state.phase !== 'idle') return;
+  const secs = +$('recordSecs').value || 5;
+  const count = Math.max(0, Math.round(+$('countdown').value || 0));
+  const rate = fps();
+  const total = Math.round(secs * rate);
   state.cancel = false;
   try { wakeLock = await navigator.wakeLock?.request('screen'); } catch { /* optional */ }
-  btn.textContent = '■ Cancel';
-  state.recording = true; // pauses live preview so capture timing is steady
+  if (audioCtx?.state === 'suspended') audioCtx.resume();
+  $('stage').scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  // 1) Countdown — nothing is captured yet, and the screen says so.
   for (let i = count; i > 0 && !state.cancel; i--) {
-    status.innerHTML = `<b>Get ready… ${i}</b>`;
+    setPhase('countdown', `Starting in ${i}… (tap to cancel)`);
+    overlay('countdown', String(i), 'Get in position. Not recording yet.');
+    beep(660, 0.12);
+    buzz(40);
     await sleep(1000);
   }
-  btn.textContent = '■ Stop';
-  $('recDot').classList.remove('hidden');
-  const settings = cutSettings();
-  const interval = 1000 / fps();
-  const total = Math.round(secs * fps());
-  let captured = 0;
-  let processing = Promise.resolve();
+  if (state.cancel) return finishRecording(0, []);
+
+  // 2) Recording — fixed clock, grab only (no heavy processing), so snaps are evenly spaced.
+  setPhase('recording', '■ Stop recording');
+  overlay('recording', 'GO!', `Recording · 0 / ${total} photos`, 0);
+  beep(1320, 0.25);
+  buzz(120);
+  const shots = [];
   const t0 = performance.now();
   for (let i = 0; i < total && !state.cancel; i++) {
-    const wait = t0 + i * interval - performance.now();
+    const wait = t0 + i * (1000 / rate) - performance.now();
     if (wait > 0) await sleep(wait);
     const c = grabFrame(cam, procRes(), $('mirror').checked);
-    captured++;
-    processing = processing.then(() => addFrame(c, settings));
-    status.innerHTML = `<b>Recording ${i + 1} / ${total}</b> · cutting out in the background…`;
-    const o = $('origCanvas');
-    o.width = c.width; o.height = c.height;
-    o.getContext('2d').drawImage(c, 0, 0);
+    showRaw(c);
+    // Keep just the compressed JPEG; free the full-size pixels right away (phones run out of memory).
+    shots.push(canvasToBlob(c).then((b) => { c.width = c.height = 0; return b; }));
+    flash();
+    const left = Math.max(0, secs - (performance.now() - t0) / 1000);
+    overlay('recording', `${fmt(left, 1)}s`, `Recording · ${i + 1} / ${total} photos`, (i + 1) / total);
+    $('recordBtn').textContent = `■ Stop recording (${fmt(left, 1)} s left)`;
   }
-  state.recording = false;
-  $('recDot').classList.add('hidden');
-  btn.textContent = '● Record & auto-cut';
-  status.innerHTML = 'Finishing cutouts…';
-  await processing;
+  beep(520, 0.3);
+  buzz([60, 60, 60]);
+  await finishRecording(total, shots);
+});
+
+async function finishRecording(total, shots) {
+  const settings = cutSettings();
+  if (shots.length) {
+    // 3) Processing — clearly separate from recording, with its own progress.
+    setPhase('processing', `Cutting out 0 / ${shots.length}…`);
+    overlay('processing', 'Done!', `Recording finished. Cutting out ${shots.length} photos…`, 0);
+    for (let i = 0; i < shots.length; i++) {
+      const blob = await shots[i];
+      const c = await blobToCanvas(blob);
+      await addFrame(c, settings, blob);
+      c.width = c.height = 0;
+      $('recordBtn').textContent = `Cutting out ${i + 1} / ${shots.length}…`;
+      overlay('processing', `${i + 1}/${shots.length}`, 'Recording finished. Cutting out your photos…', (i + 1) / shots.length);
+    }
+  }
   wakeLock?.release?.().catch(() => {});
   wakeLock = null;
+  const stopped = state.cancel;
   state.cancel = false;
+  overlay(null);
+  setPhase('idle', '● Start recording');
   updateEstimate();
   rebuildSheets();
-  if (captured) { toast(`Captured ${captured} frames.`); go('frames'); }
-});
+  if (!shots.length) { toast('Cancelled. Nothing was recorded.'); return; }
+  toast(stopped ? `Stopped early: ${shots.length} of ${total} photos kept.` : `All done: ${shots.length} photos cut out.`);
+  go('frames');
+}
 
 // ---------- estimate ----------
 function updateEstimate() {
@@ -599,6 +692,26 @@ function bestOrientation(items, s) {
 
 // ---------- frames gallery ----------
 const included = () => state.frames.filter((f) => f.include && f.cut);
+
+/**
+ * Flags frames whose cutout size jumps compared with their neighbours. That's usually a glitchy mask
+ * (missing chunks, or a patch of background left in) that would flicker in the animation.
+ */
+function oddFrames() {
+  const list = included().filter((f) => f.cut.area > 0);
+  const odd = new Set();
+  if (list.length < 5) return odd;
+  list.forEach((f, i) => {
+    const near = [];
+    for (let j = Math.max(0, i - 3); j <= Math.min(list.length - 1, i + 3); j++) if (j !== i) near.push(list[j].cut.area);
+    near.sort((a, b) => a - b);
+    const med = near[near.length >> 1];
+    const r = f.cut.area / med;
+    if (r < 0.8 || r > 1.25) odd.add(f.id);
+  });
+  return odd;
+}
+
 function renderFrames() {
   const wrap = $('frames');
   wrap.innerHTML = '';
@@ -606,12 +719,17 @@ function renderFrames() {
     wrap.innerHTML = '<p class="empty">No frames yet. Go to <b>Capture</b> to make some.</p>';
   }
   let num = 0;
+  const odd = oddFrames();
+  const skipOdd = $('skipOddBtn');
+  skipOdd.classList.toggle('hidden', !odd.size);
+  skipOdd.textContent = `Skip ${odd.size} ⚠ frame${odd.size > 1 ? 's' : ''}`;
   const frag = document.createDocumentFragment();
   for (const f of state.frames) {
     const on = f.include && f.cut;
     if (on) num++;
     const b = document.createElement('button');
-    b.className = 'frame' + (on ? '' : ' off') + (f.cut ? '' : ' empty-frame');
+    b.className = 'frame' + (on ? '' : ' off') + (f.cut ? '' : ' empty-frame') + (odd.has(f.id) ? ' odd' : '');
+    if (odd.has(f.id)) b.title = 'This cutout looks different from its neighbours (possible glitch)';
     b.type = 'button';
     b.setAttribute('aria-pressed', String(!!on));
     b.setAttribute('aria-label', on ? `Frame ${num}. Tap to skip.` : 'Skipped frame. Tap to include.');
@@ -651,6 +769,13 @@ $('includeAllBtn').addEventListener('click', () => {
   renderFrames();
   rebuildSheets();
 });
+$('skipOddBtn').addEventListener('click', () => {
+  const odd = oddFrames();
+  state.frames.forEach((f) => { if (odd.has(f.id)) { f.include = false; saveFrame(f); } });
+  renderFrames();
+  rebuildSheets();
+  toast(`Skipped ${odd.size} glitchy frame${odd.size > 1 ? 's' : ''}. Tap one to bring it back.`);
+});
 $('everyOtherBtn').addEventListener('click', () => {
   // Drop every second sticker (e.g. 24 → 12 fps) and slow playback to match.
   included().forEach((f, i) => { if (i % 2 === 1) { f.include = false; saveFrame(f); } });
@@ -684,9 +809,10 @@ $('reprocessBtn').addEventListener('click', async () => {
   for (let i = 0; i < state.frames.length; i++) {
     const f = state.frames[i];
     const c = await blobToCanvas(f.raw);
-    try { f.cut = await cutoutFrame(c, settings); } catch (e) { reportAiError(e); }
-    f.include = !!f.cut;
-    await setCutPng(f);
+    let res = null;
+    try { res = await cutoutFrame(c, settings); } catch (e) { reportAiError(e); }
+    f.include = !!res;
+    await setCut(f, res);
     saveFrame(f);
     setProgress((i + 1) / state.frames.length, `Re-cutting ${i + 1} / ${state.frames.length}`);
   }
@@ -702,7 +828,9 @@ function drawAnimFrame(ctx, f, bg) {
   const c = ctx.canvas;
   ctx.clearRect(0, 0, c.width, c.height);
   if (bg !== 'checker') { ctx.fillStyle = bg; ctx.fillRect(0, 0, c.width, c.height); }
-  ctx.drawImage(f.cut.canvas, f.cut.bbox.x, f.cut.bbox.y);
+  const img = frameImg(f);
+  if (img.complete && img.naturalWidth) ctx.drawImage(img, f.cut.bbox.x, f.cut.bbox.y);
+  else img.decode().then(() => !playing && drawFirstFrame()).catch(() => {});
 }
 function sizePlayCanvas() {
   const fr = included();
@@ -722,6 +850,7 @@ $('playBtn').addEventListener('click', async () => {
   if (!included().length) return;
   playing = true;
   $('playBtn').textContent = '■ Stop';
+  await preloadImgs(included());
   const ctx = sizePlayCanvas().getContext('2d');
   let i = 0;
   while (playing && included().length && state.screen === 'frames') {
@@ -742,6 +871,7 @@ $('webmBtn').addEventListener('click', async () => {
   const c = sizePlayCanvas();
   const bg = $('playBg').value === 'checker' ? '#ffffff' : $('playBg').value;
   try {
+    await preloadImgs(fr);
     const blob = await recordWebm(c, fr.length, fps(), (ctx, i) => drawAnimFrame(ctx, fr[i], bg), fr.length < 24 ? 3 : 1);
     download(blob, `dance-preview-${fps()}fps.webm`);
   } catch (e) {
@@ -779,7 +909,8 @@ async function buildAll() {
   const scale = (s.figureH * DPI) / maxH;
   const stickers = [];
   for (let i = 0; i < frames.length; i++) {
-    const canvas = buildSticker(frames[i].cut, {
+    const art = await blobToCanvas(frames[i].cutPng);
+    const canvas = buildSticker({ canvas: art, bbox: frames[i].cut.bbox }, {
       scale,
       offsetPx: s.borderW * DPI,
       borderColor: s.borderColor,
@@ -793,10 +924,17 @@ async function buildAll() {
         textColor: pickTextColor(s.badge.color),
       },
     });
-    stickers.push({ canvas, number: i + 1 });
+    const blob = await canvasToBlob(canvas, 'image/png');
+    const k = Math.min(1, 160 / canvas.height);
+    const preview = document.createElement('canvas');
+    preview.width = Math.max(1, Math.round(canvas.width * k));
+    preview.height = Math.max(1, Math.round(canvas.height * k));
+    preview.getContext('2d', { willReadFrequently: true }).drawImage(canvas, 0, 0, preview.width, preview.height);
+    stickers.push({ blob, w: canvas.width, h: canvas.height, preview, number: i + 1 });
+    art.width = art.height = canvas.width = canvas.height = 0; // free memory now
     if (i % 4 === 3) await sleep(0);
   }
-  const layout = bestOrientation(stickers.map((st) => ({ w: st.canvas.width, h: st.canvas.height })), s);
+  const layout = bestOrientation(stickers.map((st) => ({ w: st.w, h: st.h })), s);
   return { stickers, layout, settings: s };
 }
 function pickTextColor(hex) {
@@ -828,7 +966,7 @@ const rebuildSheets = debounce(async () => {
   updateEstimate();
 }, 250);
 
-function renderSheetCanvas(built, sheet, { preview }) {
+async function renderSheetCanvas(built, sheet, { preview }) {
   const { area } = built.layout;
   const s = built.settings;
   const W = Math.round(area.w * DPI), H = Math.round(area.h * DPI);
@@ -849,31 +987,36 @@ function renderSheetCanvas(built, sheet, { preview }) {
       ctx.save();
       ctx.shadowColor = 'rgba(0,0,0,0.35)';
       ctx.shadowBlur = 2;
-      ctx.drawImage(built.stickers[p.index].canvas, m + p.x * k, m + p.y * k, p.w * k, p.h * k);
+      ctx.drawImage(built.stickers[p.index].preview, m + p.x * k, m + p.y * k, p.w * k, p.h * k);
       ctx.restore();
     }
     return c;
   }
   c.width = W; c.height = H;
-  const ctx = c.getContext('2d');
-  for (const p of sheet.placements) ctx.drawImage(built.stickers[p.index].canvas, p.x, p.y);
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  for (const p of sheet.placements) {
+    const bmp = await createImageBitmap(built.stickers[p.index].blob);
+    ctx.drawImage(bmp, p.x, p.y);
+    bmp.close();
+  }
   return c;
 }
 
-function renderSheets(built) {
+async function renderSheets(built) {
   const { layout } = built;
   const wrap = $('sheets');
   wrap.innerHTML = '';
-  layout.sheets.forEach((sh, i) => {
+  for (let i = 0; i < layout.sheets.length; i++) {
+    const sh = layout.sheets[i];
     const fig = document.createElement('figure');
     fig.className = 'sheet';
-    fig.appendChild(renderSheetCanvas(built, sh, { preview: true }));
+    fig.appendChild(await renderSheetCanvas(built, sh, { preview: true }));
     const nums = sh.placements.map((p) => p.index + 1);
     const cap = document.createElement('figcaption');
     cap.textContent = `Sheet ${i + 1} · #${nums[0]}–${nums[nums.length - 1]}`;
     fig.appendChild(cap);
     wrap.appendChild(fig);
-  });
+  }
   const oversize = layout.sheets.some((sh) => sh.placements.some((p) => p.oversize));
   const n = layout.sheets.length;
   $('stats').innerHTML =
@@ -921,7 +1064,7 @@ async function sheetFiles() {
   ];
   for (let i = 0; i < built.layout.sheets.length; i++) {
     const sh = built.layout.sheets[i];
-    const c = renderSheetCanvas(built, sh, { preview: false });
+    const c = await renderSheetCanvas(built, sh, { preview: false });
     const nums = sh.placements.map((p) => p.index + 1);
     const wIn = c.width / DPI, hIn = c.height / DPI;
     const box = contentBox(c);
@@ -972,8 +1115,8 @@ $('dlStickers').addEventListener('click', async () => {
     const lines = ['Individual stickers (300 dpi, transparent PNG). Size in Design Space:'];
     for (const st of state.stickers) {
       const name = `sticker-${String(st.number).padStart(3, '0')}.png`;
-      files.push({ name, blob: await pngWithDpi(st.canvas, DPI) });
-      lines.push(`${name}: ${fmt(st.canvas.width / DPI)} × ${fmt(st.canvas.height / DPI)} in`);
+      files.push({ name, blob: await pngWithDpi(st.blob, DPI) });
+      lines.push(`${name}: ${fmt(st.w / DPI)} × ${fmt(st.h / DPI)} in`);
     }
     files.push({ name: 'SIZES.txt', text: lines.join('\n') + '\n' });
     download(await zipFiles(files), `stickers-${state.stickers.length}.zip`);
@@ -1038,7 +1181,7 @@ async function restore() {
   for (const r of recs) {
     const f = { id: r.id, raw: r.raw, cut: null, cutPng: r.cutPng, include: r.include, thumb: null };
     if (r.cutPng && r.bbox) {
-      f.cut = { canvas: await blobToCanvas(r.cutPng), bbox: r.bbox, srcW: r.srcW, srcH: r.srcH };
+      f.cut = { bbox: r.bbox, srcW: r.srcW, srcH: r.srcH, area: r.area || 0 };
       f.thumb = URL.createObjectURL(r.cutPng);
       state.srcW = r.srcW; state.srcH = r.srcH;
     }
