@@ -4,22 +4,28 @@ import { loadSegmenter } from './segmenter.js';
 import { buildSticker, DPI } from './sticker.js';
 import { SHEETS, packSheets, usableArea } from './layout.js';
 import { pngWithDpi, download, zipFiles, recordWebm } from './export.js';
+import * as store from './store.js';
 
 const $ = (id) => document.getElementById(id);
 const state = {
-  mode: 'upload',
-  frames: [], // { id, raw: Blob, cut: {canvas,bbox,srcW,srcH}|null, include, thumb }
+  screen: 'source',
+  mode: 'upload', // 'upload' | 'live'
+  frames: [], // { id, raw: Blob, cut: {canvas,bbox,srcW,srcH}|null, cutPng: Blob|null, include, thumb }
   nextId: 1,
   srcW: 0, srcH: 0,
   stream: null,
   cancel: false,
   busy: false,
-  stickers: null, // cached built stickers [{canvas, frame}]
+  recording: false,
+  stickers: null,
   layout: null,
+  storageOk: true,
 };
+const STAGE_SCREENS = new Set(['source', 'cutout', 'capture']);
 
-// ---------- small utils ----------
+// ---------- utils ----------
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const fmt = (n, d = 2) => Number(n).toFixed(d);
 function toast(msg, ms = 2600) {
   const t = $('toast');
   t.textContent = msg;
@@ -40,12 +46,59 @@ async function blobToCanvas(blob) {
   bmp.close();
   return c;
 }
-const fmt = (n, d = 2) => Number(n).toFixed(d);
+function confirmDialog(title, text, okLabel = 'Delete') {
+  const dlg = $('confirmDlg');
+  $('confirmTitle').textContent = title;
+  $('confirmText').textContent = text;
+  $('confirmOk').textContent = okLabel;
+  dlg.showModal();
+  return new Promise((r) => dlg.addEventListener('close', () => r(dlg.returnValue === 'ok'), { once: true }));
+}
 
-// ---------- settings ----------
+// ---------- settings (persisted) ----------
+const SETTING_IDS = [
+  'keyColor', 'tolerance', 'softness', 'spill', 'choke', 'procRes', 'cleanSpecks', 'mirror', 'livePreview',
+  'fps', 'countdown', 'recordSecs', 'preset', 'customW', 'customH', 'orientation', 'figureH', 'borderW', 'gap',
+  'margin', 'borderColor', 'fillHoles', 'badgeShow', 'badgeCorner', 'badgeSize', 'badgeColor', 'playBg',
+];
+function readSettings() {
+  const s = { method: radio('method'), srcMode: radio('srcMode'), screen: state.screen };
+  for (const id of SETTING_IDS) { const el = $(id); s[id] = el.type === 'checkbox' ? el.checked : el.value; }
+  return s;
+}
+function applySettings(s) {
+  if (!s) return;
+  for (const id of SETTING_IDS) {
+    const el = $(id);
+    if (!(id in s) || !el) continue;
+    if (el.type === 'checkbox') el.checked = !!s[id];
+    else {
+      if (el.tagName === 'SELECT' && ![...el.options].some((o) => o.value === String(s[id]))) addOption(el, s[id]);
+      el.value = s[id];
+    }
+    const out = document.querySelector(`output[for="${id}"]`);
+    if (out) out.textContent = el.value;
+  }
+  setRadio('method', s.method);
+  setRadio('srcMode', s.srcMode);
+}
+const radio = (name) => document.querySelector(`input[name="${name}"]:checked`)?.value;
+function setRadio(name, v) {
+  const el = v && document.querySelector(`input[name="${name}"][value="${v}"]`);
+  if (el) el.checked = true;
+}
+function addOption(sel, v) {
+  const o = document.createElement('option');
+  o.value = v; o.textContent = `${v} fps`;
+  sel.appendChild(o);
+}
+const saveSettings = debounce(() => store.setKV('settings', readSettings()), 300);
+document.addEventListener('input', (e) => { if (e.target.closest('.app')) saveSettings(); });
+document.addEventListener('change', (e) => { if (e.target.closest('.app')) saveSettings(); });
+
 function cutSettings() {
   return {
-    method: document.querySelector('input[name="method"]:checked').value,
+    method: radio('method'),
     keyColor: $('keyColor').value,
     tolerance: +$('tolerance').value,
     softness: +$('softness').value,
@@ -79,27 +132,78 @@ function sheetSettings() {
 const procRes = () => +$('procRes').value;
 const fps = () => +$('fps').value;
 
-// ---------- tabs ----------
-document.querySelectorAll('.tab').forEach((tab) => {
-  tab.addEventListener('click', () => {
-    document.querySelectorAll('.tab').forEach((t) => {
-      t.classList.toggle('active', t === tab);
-      t.setAttribute('aria-selected', t === tab);
-    });
-    state.mode = tab.dataset.tab;
-    document.querySelectorAll('.tabpanel').forEach((p) => p.classList.toggle('hidden', p.dataset.panel !== state.mode));
-    $('extractBtn').classList.toggle('hidden', state.mode !== 'upload');
-    updateEstimate();
-    if (state.mode === 'upload') previewUploadFrame();
-  });
+// ---------- save indicator ----------
+let pending = 0;
+async function persistOp(p) {
+  pending++;
+  $('saveState').textContent = 'Saving…';
+  $('saveState').classList.add('saving');
+  const r = await p;
+  pending--;
+  if (!pending) {
+    $('saveState').textContent = state.storageOk ? 'Saved' : 'Not saved';
+    $('saveState').classList.remove('saving');
+  }
+  return r;
+}
+async function saveFrame(f) {
+  return persistOp(store.putFrame({
+    id: f.id, raw: f.raw, cutPng: f.cutPng, include: f.include,
+    bbox: f.cut?.bbox || null, srcW: f.cut?.srcW || state.srcW, srcH: f.cut?.srcH || state.srcH,
+  }));
+}
+
+// ---------- navigation ----------
+function go(screen) {
+  state.screen = screen;
+  document.querySelectorAll('.screen').forEach((s) => s.classList.toggle('hidden', s.dataset.screen !== screen));
+  document.querySelectorAll('.tabbar [data-go]').forEach((b) => b.setAttribute('aria-selected', b.dataset.go === screen));
+  const withStage = STAGE_SCREENS.has(screen);
+  document.body.classList.toggle('with-stage', withStage);
+  $('stage').classList.toggle('hidden', !withStage);
+  if (withStage && state.mode === 'live' && state.stream && !liveLoopOn) liveLoop();
+  if (screen === 'sheets' && !state.stickers && included().length) rebuildSheets();
+  if (screen === 'frames') drawFirstFrame();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+  saveSettings();
+}
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-go]');
+  if (b) go(b.dataset.go);
 });
 
+function setMode(mode) {
+  state.mode = mode;
+  document.querySelectorAll('[data-mode]').forEach((el) => el.classList.toggle('hidden', el.dataset.mode !== mode));
+  $('scrubber').classList.toggle('hidden', mode !== 'upload' || !video.duration || !!images);
+  if (mode === 'upload') {
+    stopCamera();
+    if (video.duration) previewUploadFrame();
+    else if (!images) clearStage();
+  } else if (!state.stream) {
+    clearStage('Tap “Start camera”');
+  } else if (!liveLoopOn) liveLoop();
+  updateEstimate();
+}
+document.querySelectorAll('input[name="srcMode"]').forEach((r) => r.addEventListener('change', () => setMode(radio('srcMode'))));
+
+function clearStage(msg = 'Add a video or start the camera') {
+  previewSource = null;
+  for (const id of ['origCanvas', 'cutCanvas']) {
+    const c = $(id);
+    c.getContext('2d').clearRect(0, 0, c.width, c.height);
+  }
+  $('stageEmpty').textContent = msg;
+  $('stageEmpty').classList.remove('hidden');
+}
+
 // ---------- cutout preview ----------
-let playing = false;
-let previewSource = null; // canvas holding the latest original frame
+let previewSource = null;
 let previewBusy = false;
+let playing = false;
 async function renderPreview(srcCanvas) {
   previewSource = srcCanvas;
+  $('stageEmpty').classList.add('hidden');
   const orig = $('origCanvas');
   orig.width = srcCanvas.width; orig.height = srcCanvas.height;
   orig.getContext('2d').drawImage(srcCanvas, 0, 0);
@@ -107,11 +211,10 @@ async function renderPreview(srcCanvas) {
   work.width = srcCanvas.width; work.height = srcCanvas.height;
   work.getContext('2d', { willReadFrequently: true }).drawImage(srcCanvas, 0, 0);
   const cut = $('cutCanvas');
-  cut.width = srcCanvas.width; cut.height = srcCanvas.height;
-  const ctx = cut.getContext('2d');
   try {
     const res = await cutoutFrame(work, cutSettings());
-    ctx.clearRect(0, 0, cut.width, cut.height);
+    cut.width = srcCanvas.width; cut.height = srcCanvas.height;
+    const ctx = cut.getContext('2d');
     if (res) ctx.drawImage(res.canvas, res.bbox.x, res.bbox.y);
   } catch (e) {
     reportAiError(e);
@@ -127,43 +230,49 @@ const refreshPreview = debounce(async () => {
 
 function reportAiError(e) {
   console.error(e);
-  $('aiStatus').textContent = 'Could not load the AI model (needs an internet connection the first time). Green screen key still works offline.';
+  $('aiStatus').textContent = 'Couldn’t load the AI model. It needs internet the first time. The green screen key still works offline.';
   $('aiStatus').classList.add('warn');
 }
 
-// Eyedropper on the original preview.
 $('origCanvas').addEventListener('click', (e) => {
+  if (!previewSource) return;
   const c = $('origCanvas');
   const r = c.getBoundingClientRect();
-  const x = Math.round(((e.clientX - r.left) / r.width) * c.width);
-  const y = Math.round(((e.clientY - r.top) / r.height) * c.height);
+  // Canvas uses object-fit: contain; map the click into the drawn image area.
+  const k = Math.min(r.width / c.width, r.height / c.height);
+  const ox = (r.width - c.width * k) / 2, oy = (r.height - c.height * k) / 2;
+  const x = Math.round((e.clientX - r.left - ox) / k);
+  const y = Math.round((e.clientY - r.top - oy) / k);
+  if (x < 0 || y < 0 || x >= c.width || y >= c.height) return;
   const d = c.getContext('2d').getImageData(Math.max(0, x - 2), Math.max(0, y - 2), 5, 5).data;
   let rs = 0, gs = 0, bs = 0, n = 0;
   for (let i = 0; i < d.length; i += 4) { rs += d[i]; gs += d[i + 1]; bs += d[i + 2]; n++; }
   $('keyColor').value = rgbToHex([rs / n, gs / n, bs / n]);
-  if (cutSettings().method === 'ai') document.querySelector('input[name="method"][value="key"]').checked = true;
+  if (radio('method') === 'ai') setRadio('method', 'key');
   syncMethodUI();
   refreshPreview();
+  saveSettings();
   toast(`Key colour set to ${$('keyColor').value}`);
 });
 $('autoKey').addEventListener('click', () => {
+  if (!previewSource) return toast('Add a video or start the camera first.');
   const c = $('origCanvas');
-  if (!previewSource) return toast('Load a video or start the camera first.');
   const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
   $('keyColor').value = rgbToHex(detectKeyColor(d, c.width, c.height));
   refreshPreview();
+  saveSettings();
   toast(`Detected backdrop colour ${$('keyColor').value}`);
 });
 
 function syncMethodUI() {
-  const m = cutSettings().method;
+  const m = radio('method');
   $('keyControls').classList.toggle('hidden', m === 'ai');
   const st = $('aiStatus');
   st.classList.remove('warn');
   if (m !== 'key') {
     st.textContent = 'Loading AI person segmentation…';
     loadSegmenter()
-      .then(() => { st.textContent = 'AI segmentation ready (runs on your device).'; refreshPreview(); })
+      .then(() => { st.textContent = 'AI segmentation ready. It runs on your device.'; refreshPreview(); })
       .catch(reportAiError);
   } else st.textContent = '';
 }
@@ -180,37 +289,56 @@ document.querySelectorAll('input[name="method"]').forEach((r) => r.addEventListe
 
 // ---------- upload ----------
 const video = $('video');
-let images = null; // batch of photos instead of a video
-$('videoFile').addEventListener('change', async (e) => {
-  const files = [...e.target.files];
+let images = null;
+async function loadFiles(files) {
   if (!files.length) return;
+  if (state.mode !== 'upload') { setRadio('srcMode', 'upload'); setMode('upload'); }
   if (files[0].type.startsWith('image/')) {
-    images = files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-    video.classList.add('hidden');
-    $('trimRow').classList.add('hidden');
+    images = files.filter((f) => f.type.startsWith('image/'))
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    video.removeAttribute('src');
+    $('scrubber').classList.add('hidden');
+    $('fileName').textContent = `${images.length} photo${images.length > 1 ? 's' : ''}`;
     $('extractBtn').disabled = false;
     $('extractBtn').textContent = `Cut out ${images.length} photo${images.length > 1 ? 's' : ''}`;
-    const c = grabFrame(await createImageBitmap(images[0]), procRes());
-    renderPreview(c);
+    renderPreview(grabFrame(await createImageBitmap(images[0]), procRes()));
     updateEstimate();
     return;
   }
   images = null;
+  $('fileName').textContent = files[0].name;
   $('extractBtn').textContent = 'Extract & cut out frames';
+  if (video.src) URL.revokeObjectURL(video.src);
   video.src = URL.createObjectURL(files[0]);
-  video.classList.remove('hidden');
-  $('trimRow').classList.remove('hidden');
-});
+}
+$('videoFile').addEventListener('change', (e) => loadFiles([...e.target.files]));
+const dz = $('dropzone');
+['dragenter', 'dragover'].forEach((t) => dz.addEventListener(t, (e) => { e.preventDefault(); dz.classList.add('over'); }));
+['dragleave', 'drop'].forEach((t) => dz.addEventListener(t, (e) => { e.preventDefault(); dz.classList.remove('over'); }));
+dz.addEventListener('drop', (e) => loadFiles([...e.dataTransfer.files]));
+
 video.addEventListener('loadedmetadata', () => {
   $('trimStart').value = 0;
   $('trimEnd').value = fmt(video.duration, 1);
   $('trimStart').max = $('trimEnd').max = video.duration;
   $('extractBtn').disabled = false;
+  $('scrubber').classList.remove('hidden');
   video.currentTime = Math.min(0.5, video.duration / 2);
   updateEstimate();
+  toast('Video loaded. Tune the cutout next.');
 });
-video.addEventListener('seeked', () => { if (!state.busy) previewUploadFrame(); });
-video.addEventListener('pause', () => previewUploadFrame());
+video.addEventListener('error', () => toast('This video format isn’t supported by your browser. Try MP4 or WebM.', 5000));
+video.addEventListener('seeked', () => {
+  $('timeLabel').textContent = `${fmt(video.currentTime, 1)} s`;
+  if (!state.busy) {
+    $('scrub').value = Math.round((video.currentTime / video.duration) * 1000);
+    previewUploadFrame();
+  }
+});
+$('scrub').addEventListener('input', () => {
+  if (!video.duration || state.busy) return;
+  video.currentTime = ($('scrub').value / 1000) * video.duration;
+});
 function previewUploadFrame() {
   if (state.mode !== 'upload' || !video.videoWidth || images) return;
   previewSource = grabFrame(video, procRes());
@@ -218,7 +346,7 @@ function previewUploadFrame() {
 }
 $('setStart').addEventListener('click', () => { $('trimStart').value = fmt(video.currentTime, 1); updateEstimate(); });
 $('setEnd').addEventListener('click', () => { $('trimEnd').value = fmt(video.currentTime, 1); updateEstimate(); });
-['trimStart', 'trimEnd', 'fps'].forEach((id) => $(id).addEventListener('input', updateEstimate));
+['trimStart', 'trimEnd', 'fps', 'recordSecs'].forEach((id) => $(id).addEventListener('input', updateEstimate));
 
 function seekTo(t) {
   return new Promise((resolve) => {
@@ -228,20 +356,26 @@ function seekTo(t) {
   });
 }
 
+function setProgress(v, label) {
+  $('progressRow').classList.remove('hidden');
+  $('progress').value = v;
+  $('progressLabel').textContent = label || '';
+}
+const hideProgress = () => $('progressRow').classList.add('hidden');
+
 $('extractBtn').addEventListener('click', async () => {
   if (state.busy) return;
   state.busy = true; state.cancel = false;
   $('extractBtn').disabled = true;
-  $('cancelBtn').classList.remove('hidden');
-  const prog = $('progress');
-  prog.classList.remove('hidden');
   const settings = cutSettings();
+  const before = state.frames.length;
   try {
     if (images) {
       for (let i = 0; i < images.length && !state.cancel; i++) {
         const c = grabFrame(await createImageBitmap(images[i]), procRes());
+        renderPreview(c);
         await addFrame(c, settings);
-        prog.value = (i + 1) / images.length;
+        setProgress((i + 1) / images.length, `${i + 1} / ${images.length}`);
       }
     } else {
       video.pause();
@@ -255,18 +389,19 @@ $('extractBtn').addEventListener('click', async () => {
         const c = grabFrame(video, procRes());
         if (i % 3 === 0) renderPreview(c);
         await addFrame(c, settings);
-        prog.value = (i + 1) / times.length;
+        setProgress((i + 1) / times.length, `${i + 1} / ${times.length}`);
       }
     }
-    toast(state.cancel ? 'Stopped.' : `Done — ${state.frames.length} frames.`);
+    const made = state.frames.length - before;
+    toast(state.cancel ? `Stopped after ${made} frames.` : `Done: ${made} frames cut out.`);
+    if (!state.cancel && made) go('frames');
   } catch (e) {
     console.error(e);
     toast('Something went wrong while extracting: ' + e.message, 5000);
   } finally {
     state.busy = false;
     $('extractBtn').disabled = false;
-    $('cancelBtn').classList.add('hidden');
-    prog.classList.add('hidden');
+    hideProgress();
     rebuildSheets();
   }
 });
@@ -279,38 +414,50 @@ async function addFrame(srcCanvas, settings) {
   work.getContext('2d', { willReadFrequently: true }).drawImage(srcCanvas, 0, 0);
   let cut = null;
   try { cut = await cutoutFrame(work, settings); } catch (e) { reportAiError(e); }
-  const f = { id: state.nextId++, raw, cut, include: !!cut, thumb: null };
+  const f = { id: state.nextId++, raw, cut, cutPng: null, include: !!cut, thumb: null };
   state.srcW = srcCanvas.width; state.srcH = srcCanvas.height;
   state.frames.push(f);
-  await makeThumb(f);
+  await setCutPng(f);
+  saveFrame(f);
   renderFrames();
   return f;
 }
-async function makeThumb(f) {
+async function setCutPng(f) {
   if (f.thumb) URL.revokeObjectURL(f.thumb);
-  f.thumb = f.cut ? URL.createObjectURL(await canvasToBlob(f.cut.canvas, 'image/png')) : null;
+  f.cutPng = f.cut ? await canvasToBlob(f.cut.canvas, 'image/png') : null;
+  f.thumb = f.cutPng ? URL.createObjectURL(f.cutPng) : null;
 }
 
 // ---------- live camera ----------
 const cam = $('cam');
 let liveLoopOn = false;
+let wakeLock = null;
 async function listCameras() {
   const devs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
   const sel = $('camSelect');
   const cur = sel.value;
-  sel.innerHTML = devs.map((d, i) => `<option value="${d.deviceId}">${d.label || 'Camera ' + (i + 1)}</option>`).join('');
+  sel.innerHTML = '';
+  devs.forEach((d, i) => {
+    const o = document.createElement('option');
+    o.value = d.deviceId;
+    o.textContent = d.label || `Camera ${i + 1}`;
+    sel.appendChild(o);
+  });
   if (cur) sel.value = cur;
 }
 async function startCamera() {
   if (!navigator.mediaDevices?.getUserMedia) {
-    $('liveStatus').textContent = 'This browser can\'t access the camera here. Open the app over https:// or localhost.';
+    $('liveStatus').textContent = 'The camera isn’t available here. Open the app over https:// (or install it).';
     return;
   }
-  state.stream?.getTracks().forEach((t) => t.stop());
+  stopCamera();
   const deviceId = $('camSelect').value;
   try {
     state.stream = await navigator.mediaDevices.getUserMedia({
-      video: { deviceId: deviceId ? { exact: deviceId } : undefined, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
+      video: {
+        deviceId: deviceId ? { exact: deviceId } : undefined,
+        width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 },
+      },
       audio: false,
     });
   } catch (e) {
@@ -323,30 +470,40 @@ async function startCamera() {
   $('recordBtn').disabled = false;
   $('snapBtn').disabled = false;
   $('camStart').textContent = 'Restart camera';
-  $('liveStatus').textContent = 'Camera on. Step back so your whole body is in frame.';
+  $('liveStatus').textContent = 'Camera on. Step back so your whole body is in the frame.';
   if (!liveLoopOn) liveLoop();
+}
+function stopCamera() {
+  state.stream?.getTracks().forEach((t) => t.stop());
+  state.stream = null;
+  $('recordBtn').disabled = true;
+  $('snapBtn').disabled = true;
+  $('camStart').textContent = 'Start camera';
 }
 $('camStart').addEventListener('click', startCamera);
 $('camSelect').addEventListener('change', () => state.stream && startCamera());
 
 async function liveLoop() {
   liveLoopOn = true;
-  while (state.stream && state.mode === 'live') {
-    if ($('livePreview').checked && !state.recording) {
+  while (state.stream && state.mode === 'live' && STAGE_SCREENS.has(state.screen) && !document.hidden) {
+    if (!state.recording) {
       const c = grabFrame(cam, Math.min(480, procRes()), $('mirror').checked);
-      await renderPreview(c);
-    } else if (!state.recording) {
-      const c = grabFrame(cam, 480, $('mirror').checked);
-      const o = $('origCanvas');
-      o.width = c.width; o.height = c.height;
-      o.getContext('2d').drawImage(c, 0, 0);
-      previewSource = c;
+      if ($('livePreview').checked) await renderPreview(c);
+      else {
+        const o = $('origCanvas');
+        o.width = c.width; o.height = c.height;
+        o.getContext('2d').drawImage(c, 0, 0);
+        previewSource = c;
+        $('stageEmpty').classList.add('hidden');
+      }
     }
     await sleep(30);
   }
   liveLoopOn = false;
 }
-document.querySelector('.tab[data-tab="live"]').addEventListener('click', () => { if (state.stream && !liveLoopOn) liveLoop(); });
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && state.stream && state.mode === 'live' && !liveLoopOn) liveLoop();
+});
 
 $('snapBtn').addEventListener('click', async () => {
   const c = grabFrame(cam, procRes(), $('mirror').checked);
@@ -359,41 +516,46 @@ $('recordBtn').addEventListener('click', async () => {
   if (state.recording) { state.cancel = true; return; }
   const secs = +$('recordSecs').value || 5;
   const count = +$('countdown').value || 0;
-  const status = $('liveStatus');
+  const status = $('estimate');
   const btn = $('recordBtn');
   state.cancel = false;
+  try { wakeLock = await navigator.wakeLock?.request('screen'); } catch { /* optional */ }
+  btn.textContent = '■ Cancel';
+  state.recording = true; // pauses live preview so capture timing is steady
   for (let i = count; i > 0 && !state.cancel; i--) {
-    status.textContent = `Get ready… ${i}`;
+    status.innerHTML = `<b>Get ready… ${i}</b>`;
     await sleep(1000);
   }
-  state.recording = true;
   btn.textContent = '■ Stop';
+  $('recDot').classList.remove('hidden');
   const settings = cutSettings();
   const interval = 1000 / fps();
   const total = Math.round(secs * fps());
-  const queue = [];
-  // Capture on a fixed clock; cut out in the background so capture timing stays steady.
+  let captured = 0;
   let processing = Promise.resolve();
   const t0 = performance.now();
   for (let i = 0; i < total && !state.cancel; i++) {
-    const target = t0 + i * interval;
-    const wait = target - performance.now();
+    const wait = t0 + i * interval - performance.now();
     if (wait > 0) await sleep(wait);
     const c = grabFrame(cam, procRes(), $('mirror').checked);
-    queue.push(c);
+    captured++;
     processing = processing.then(() => addFrame(c, settings));
-    status.textContent = `Recording ${i + 1}/${total} · cutting out in background…`;
+    status.innerHTML = `<b>Recording ${i + 1} / ${total}</b> · cutting out in the background…`;
     const o = $('origCanvas');
     o.width = c.width; o.height = c.height;
     o.getContext('2d').drawImage(c, 0, 0);
   }
   state.recording = false;
+  $('recDot').classList.add('hidden');
   btn.textContent = '● Record & auto-cut';
-  status.textContent = 'Finishing cutouts…';
+  status.innerHTML = 'Finishing cutouts…';
   await processing;
-  status.textContent = `Captured ${queue.length} frames.`;
+  wakeLock?.release?.().catch(() => {});
+  wakeLock = null;
   state.cancel = false;
+  updateEstimate();
   rebuildSheets();
+  if (captured) { toast(`Captured ${captured} frames.`); go('frames'); }
 });
 
 // ---------- estimate ----------
@@ -410,14 +572,11 @@ function updateEstimate() {
     secs = +$('recordSecs').value || 0;
     n = Math.round(secs * fps());
   }
-  if (!n) { el.textContent = 'Load a video to see how many stickers it makes.'; return; }
+  if (!n) { el.textContent = state.mode === 'upload' ? 'Add a video to see how many stickers it makes.' : 'Set a recording length to see the sticker count.'; return; }
   const per = estimatePerSheet();
   const sheets = Math.ceil(n / Math.max(1, per));
-  el.innerHTML = `${secs ? `${fmt(secs, 1)} s × ${fps()} fps = ` : ''}<b>${n} stickers</b> → about <b>${sheets} sheet${sheets > 1 ? 's' : ''}</b> (${per} per sheet at ${fmt(sheetSettings().figureH)}" tall).`;
+  el.innerHTML = `${secs ? `${fmt(secs, 1)} s × ${fps()} fps = ` : ''}<b>${n} stickers</b> → about <b>${sheets} sheet${sheets > 1 ? 's' : ''}</b> <span class="hint">(${per} per sheet at ${fmt(sheetSettings().figureH)} in tall)</span>`;
 }
-$('recordSecs').addEventListener('input', updateEstimate);
-
-/** Stickers per sheet using real sticker sizes if we have them, else a typical dancer shape. */
 function estimatePerSheet() {
   const s = sheetSettings();
   if (state.layout?.perSheet) return state.layout.perSheet;
@@ -425,7 +584,6 @@ function estimatePerSheet() {
   const wIn = s.figureH * 0.55 + 2 * s.borderW;
   return bestOrientation(Array(60).fill({ w: wIn * DPI, h: hIn * DPI }), s).perSheet;
 }
-
 function bestOrientation(items, s) {
   const opts = s.orientation === 'auto' ? ['portrait', 'landscape'] : [s.orientation];
   let best = null;
@@ -444,68 +602,95 @@ const included = () => state.frames.filter((f) => f.include && f.cut);
 function renderFrames() {
   const wrap = $('frames');
   wrap.innerHTML = '';
+  if (!state.frames.length) {
+    wrap.innerHTML = '<p class="empty">No frames yet. Go to <b>Capture</b> to make some.</p>';
+  }
   let num = 0;
+  const frag = document.createDocumentFragment();
   for (const f of state.frames) {
+    const on = f.include && f.cut;
+    if (on) num++;
     const b = document.createElement('button');
-    b.className = 'frame' + (f.include && f.cut ? '' : ' off') + (f.cut ? '' : ' empty');
+    b.className = 'frame' + (on ? '' : ' off') + (f.cut ? '' : ' empty-frame');
     b.type = 'button';
-    if (f.include && f.cut) num++;
-    b.setAttribute('aria-label', f.include && f.cut ? `Frame ${num}, click to skip` : 'Skipped frame, click to include');
+    b.setAttribute('aria-pressed', String(!!on));
+    b.setAttribute('aria-label', on ? `Frame ${num}. Tap to skip.` : 'Skipped frame. Tap to include.');
     if (f.thumb) {
       const img = document.createElement('img');
-      img.src = f.thumb; img.alt = '';
+      img.src = f.thumb; img.alt = ''; img.loading = 'lazy';
       b.appendChild(img);
     }
     const tag = document.createElement('span');
     tag.className = 'num';
-    tag.textContent = f.include && f.cut ? num : '–';
+    tag.textContent = on ? num : '–';
     b.appendChild(tag);
     b.addEventListener('click', () => {
-      if (!f.cut) return toast('No person found in this frame — adjust the cutout and re-cut.');
+      if (!f.cut) return toast('No person found in this frame. Adjust the cutout and tap Re-cut all.');
       f.include = !f.include;
+      saveFrame(f);
       renderFrames();
       rebuildSheets();
     });
-    wrap.appendChild(b);
+    frag.appendChild(b);
   }
+  wrap.appendChild(frag);
   const inc = included().length;
   $('frameCount').textContent = state.frames.length ? `${inc} of ${state.frames.length} in use` : '';
+  const badge = $('framesBadge');
+  badge.textContent = inc;
+  badge.classList.toggle('hidden', !inc);
   const has = state.frames.length > 0;
-  ['reprocessBtn', 'includeAllBtn', 'clearBtn'].forEach((id) => ($(id).disabled = !has || state.busy));
+  ['reprocessBtn', 'includeAllBtn', 'clearBtn', 'everyOtherBtn'].forEach((id) => ($(id).disabled = !has || state.busy));
   $('playBtn').disabled = $('webmBtn').disabled = inc === 0;
-  if (inc && !playing) {
-    const c = sizePlayCanvas();
-    drawAnimFrame(c.getContext('2d'), included()[0], $('playBg').value);
-  }
+  $('playCanvas').closest('.player').classList.toggle('hidden', inc === 0);
+  if (state.screen === 'frames' && !playing) drawFirstFrame();
 }
 
 $('includeAllBtn').addEventListener('click', () => {
-  state.frames.forEach((f) => (f.include = !!f.cut));
+  state.frames.forEach((f) => { if (f.include !== !!f.cut) { f.include = !!f.cut; saveFrame(f); } });
   renderFrames();
   rebuildSheets();
 });
-$('clearBtn').addEventListener('click', () => {
-  if (!confirm('Remove all captured frames?')) return;
+$('everyOtherBtn').addEventListener('click', () => {
+  // Drop every second sticker (e.g. 24 → 12 fps) and slow playback to match.
+  included().forEach((f, i) => { if (i % 2 === 1) { f.include = false; saveFrame(f); } });
+  const half = fps() / 2;
+  const sel = $('fps');
+  if (![...sel.options].some((o) => +o.value === half)) addOption(sel, half);
+  sel.value = half;
+  saveSettings();
+  renderFrames();
+  rebuildSheets();
+  toast(`Halved: now ${included().length} stickers at ${half} fps.`);
+});
+$('clearBtn').addEventListener('click', async () => {
+  if (!(await confirmDialog('Clear all frames?', 'This removes every captured frame from this device.', 'Clear'))) return;
+  await clearAllFrames();
+  toast('Frames cleared.');
+});
+async function clearAllFrames() {
   state.frames.forEach((f) => f.thumb && URL.revokeObjectURL(f.thumb));
   state.frames = [];
+  state.nextId = 1;
+  await persistOp(store.clearFrames());
   renderFrames();
   rebuildSheets();
-});
+}
 $('reprocessBtn').addEventListener('click', async () => {
   if (state.busy) return;
   state.busy = true;
-  const prog = $('progress');
-  prog.classList.remove('hidden');
+  renderFrames();
   const settings = cutSettings();
   for (let i = 0; i < state.frames.length; i++) {
     const f = state.frames[i];
     const c = await blobToCanvas(f.raw);
     try { f.cut = await cutoutFrame(c, settings); } catch (e) { reportAiError(e); }
-    if (!f.cut) f.include = false;
-    await makeThumb(f);
-    prog.value = (i + 1) / state.frames.length;
+    f.include = !!f.cut;
+    await setCutPng(f);
+    saveFrame(f);
+    setProgress((i + 1) / state.frames.length, `Re-cutting ${i + 1} / ${state.frames.length}`);
   }
-  prog.classList.add('hidden');
+  hideProgress();
   state.busy = false;
   renderFrames();
   rebuildSheets();
@@ -526,16 +711,20 @@ function sizePlayCanvas() {
   c.height = fr[0]?.cut.srcH || state.srcH || 180;
   return c;
 }
+function drawFirstFrame() {
+  const fr = included();
+  if (!fr.length || playing) return;
+  drawAnimFrame(sizePlayCanvas().getContext('2d'), fr[0], $('playBg').value);
+}
+$('playBg').addEventListener('change', drawFirstFrame);
 $('playBtn').addEventListener('click', async () => {
   if (playing) { playing = false; return; }
-  const fr = included();
-  if (!fr.length) return;
+  if (!included().length) return;
   playing = true;
   $('playBtn').textContent = '■ Stop';
-  const c = sizePlayCanvas();
-  const ctx = c.getContext('2d');
+  const ctx = sizePlayCanvas().getContext('2d');
   let i = 0;
-  while (playing && included().length) {
+  while (playing && included().length && state.screen === 'frames') {
     const list = included();
     drawAnimFrame(ctx, list[i % list.length], $('playBg').value);
     i++;
@@ -547,32 +736,40 @@ $('playBtn').addEventListener('click', async () => {
 $('webmBtn').addEventListener('click', async () => {
   const fr = included();
   if (!fr.length) return;
+  if (typeof MediaRecorder === 'undefined') return toast('Saving video isn’t supported in this browser.');
   $('webmBtn').disabled = true;
   toast('Recording preview…');
   const c = sizePlayCanvas();
   const bg = $('playBg').value === 'checker' ? '#ffffff' : $('playBg').value;
-  const blob = await recordWebm(c, fr.length, fps(), (ctx, i) => drawAnimFrame(ctx, fr[i], bg), fr.length < 24 ? 3 : 1);
-  download(blob, `dance-preview-${fps()}fps.webm`);
+  try {
+    const blob = await recordWebm(c, fr.length, fps(), (ctx, i) => drawAnimFrame(ctx, fr[i], bg), fr.length < 24 ? 3 : 1);
+    download(blob, `dance-preview-${fps()}fps.webm`);
+  } catch (e) {
+    toast('Couldn’t record video: ' + e.message, 4000);
+  }
   $('webmBtn').disabled = false;
 });
 
 // ---------- sticker sheets ----------
 function initPresets() {
   const sel = $('preset');
-  sel.innerHTML = Object.entries(SHEETS).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join('');
+  sel.innerHTML = '';
+  for (const [k, v] of Object.entries(SHEETS)) {
+    const o = document.createElement('option');
+    o.value = k; o.textContent = v.label;
+    sel.appendChild(o);
+  }
   sel.value = 'stickerpix-pc';
-  applyPreset();
 }
-function applyPreset() {
+function applyPreset(resetMargin) {
   const key = $('preset').value;
   const p = SHEETS[key];
   $('customSize').classList.toggle('hidden', key !== 'custom');
   $('presetNote').textContent = p.note;
-  $('margin').value = p.margin;
+  if (resetMargin) $('margin').value = p.margin;
 }
-$('preset').addEventListener('change', () => { applyPreset(); rebuildSheets(); });
+$('preset').addEventListener('change', () => { applyPreset(true); state.layout = null; updateEstimate(); rebuildSheets(); });
 
-/** Builds all stickers at print resolution and lays them out. */
 async function buildAll() {
   const s = sheetSettings();
   const frames = included();
@@ -597,7 +794,7 @@ async function buildAll() {
       },
     });
     stickers.push({ canvas, number: i + 1 });
-    if (i % 4 === 3) await sleep(0); // keep UI responsive
+    if (i % 4 === 3) await sleep(0);
   }
   const layout = bestOrientation(stickers.map((st) => ({ w: st.canvas.width, h: st.canvas.height })), s);
   return { stickers, layout, settings: s };
@@ -612,11 +809,13 @@ let buildToken = 0;
 const rebuildSheets = debounce(async () => {
   const token = ++buildToken;
   const stats = $('stats');
+  const exportBtns = ['dlSheets', 'dlStickers', 'shareSheets'];
   if (!included().length) {
     state.stickers = null; state.layout = null;
     stats.textContent = 'No frames yet.';
     $('sheets').innerHTML = '';
-    $('dlSheets').disabled = $('dlStickers').disabled = true;
+    exportBtns.forEach((id) => ($(id).disabled = true));
+    $('sheetsBadge').classList.add('hidden');
     updateEstimate();
     return;
   }
@@ -635,7 +834,6 @@ function renderSheetCanvas(built, sheet, { preview }) {
   const W = Math.round(area.w * DPI), H = Math.round(area.h * DPI);
   const c = document.createElement('canvas');
   if (preview) {
-    // Show the whole physical sheet with its margin.
     const k = Math.min(280 / (area.sheetW * DPI), 380 / (area.sheetH * DPI));
     c.width = Math.round(area.sheetW * DPI * k);
     c.height = Math.round(area.sheetH * DPI * k);
@@ -648,13 +846,10 @@ function renderSheetCanvas(built, sheet, { preview }) {
     ctx.strokeRect(m, m, W * k, H * k);
     ctx.setLineDash([]);
     for (const p of sheet.placements) {
-      const st = built.stickers[p.index].canvas;
-      const x = m + p.x * k, y = m + p.y * k;
-      // Faint shadow hints where the cut line (sticker edge) will be.
       ctx.save();
       ctx.shadowColor = 'rgba(0,0,0,0.35)';
       ctx.shadowBlur = 2;
-      ctx.drawImage(st, x, y, p.w * k, p.h * k);
+      ctx.drawImage(built.stickers[p.index].canvas, m + p.x * k, m + p.y * k, p.w * k, p.h * k);
       ctx.restore();
     }
     return c;
@@ -667,7 +862,6 @@ function renderSheetCanvas(built, sheet, { preview }) {
 
 function renderSheets(built) {
   const { layout } = built;
-  const s = built.settings;
   const wrap = $('sheets');
   wrap.innerHTML = '';
   layout.sheets.forEach((sh, i) => {
@@ -681,34 +875,37 @@ function renderSheets(built) {
     wrap.appendChild(fig);
   });
   const oversize = layout.sheets.some((sh) => sh.placements.some((p) => p.oversize));
-  const total = built.stickers.length;
-  stats.innerHTML =
-    `<b>${total}</b> stickers · up to <b>${layout.perSheet}</b> per sheet · <b>${layout.sheets.length}</b> sheet${layout.sheets.length > 1 ? 's' : ''} ` +
+  const n = layout.sheets.length;
+  $('stats').innerHTML =
+    `<b>${built.stickers.length}</b> stickers · up to <b>${layout.perSheet}</b> per sheet · <b>${n}</b> sheet${n > 1 ? 's' : ''} ` +
     `<span class="hint">(${layout.orientation}, printable ${fmt(layout.area.w)} × ${fmt(layout.area.h)} in)</span>` +
-    (oversize ? `<br><span class="warn">Some stickers are bigger than the sheet. Lower the dancer height.</span>` : '');
-  $('dlSheets').disabled = $('dlStickers').disabled = false;
+    (oversize ? '<br><span class="warn">Some stickers are bigger than the sheet. Lower the dancer height.</span>' : '');
+  ['dlSheets', 'dlStickers', 'shareSheets'].forEach((id) => ($(id).disabled = false));
+  $('sheetsBadge').textContent = n;
+  $('sheetsBadge').classList.remove('hidden');
 }
-const stats = $('stats');
 
 ['orientation', 'figureH', 'borderW', 'gap', 'margin', 'borderColor', 'fillHoles', 'badgeShow', 'badgeCorner', 'badgeSize', 'badgeColor', 'customW', 'customH']
   .forEach((id) => $(id).addEventListener('input', () => { state.layout = null; updateEstimate(); rebuildSheets(); }));
 
-// ---------- downloads ----------
+// ---------- downloads & share ----------
 function contentBox(canvas) {
   const { data } = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
   let minX = canvas.width, minY = canvas.height, maxX = -1, maxY = -1;
-  for (let y = 0; y < canvas.height; y++) for (let x = 0; x < canvas.width; x++) {
-    if (data[(y * canvas.width + x) * 4 + 3]) {
-      if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y;
+  for (let y = 0; y < canvas.height; y++) {
+    for (let x = 0; x < canvas.width; x++) {
+      if (data[(y * canvas.width + x) * 4 + 3]) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
     }
   }
   return maxX < 0 ? { w: 0, h: 0 } : { w: maxX - minX + 1, h: maxY - minY + 1 };
 }
 
-$('dlSheets').addEventListener('click', async () => {
-  if (!state.stickers) return;
-  $('dlSheets').disabled = true;
-  toast('Preparing print files…');
+async function sheetFiles() {
   const built = { stickers: state.stickers, layout: state.layout, settings: sheetSettings() };
   const files = [];
   const lines = [
@@ -716,7 +913,7 @@ $('dlSheets').addEventListener('click', async () => {
     `Machine/paper: ${built.settings.preset.label}`,
     `Orientation: ${built.layout.orientation}`,
     `Resolution: ${DPI} dpi PNG, transparent background (Cricut cuts around each sticker)`,
-    `Frame rate these were cut at: ${fps()} fps`,
+    `Frame rate: ${fps()} fps`,
     '',
     'In Design Space: Upload → Print Then Cut image → lock proportions → set the size below.',
     'If Design Space trims the empty edges on upload, use the "sticker area" size.',
@@ -731,32 +928,137 @@ $('dlSheets').addEventListener('click', async () => {
     const name = `sheet-${String(i + 1).padStart(2, '0')}_frames-${nums[0]}-${nums[nums.length - 1]}_${fmt(wIn)}x${fmt(hIn)}in.png`;
     files.push({ name, blob: await pngWithDpi(c, DPI) });
     lines.push(`${name}\n   full image: ${fmt(wIn)} × ${fmt(hIn)} in   sticker area: ${fmt(box.w / DPI)} × ${fmt(box.h / DPI)} in   (${sh.placements.length} stickers)`);
+    await sleep(0);
   }
-  files.push({ name: 'SIZES.txt', text: lines.join('\n') + '\n' });
-  download(await zipFiles(files), `sticker-sheets-${files.length - 1}.zip`);
-  $('dlSheets').disabled = false;
+  return { files, sizes: lines.join('\n') + '\n' };
+}
+
+$('dlSheets').addEventListener('click', async () => {
+  if (!state.stickers) return;
+  $('dlSheets').disabled = true;
+  toast('Preparing print files…');
+  try {
+    const { files, sizes } = await sheetFiles();
+    download(await zipFiles([...files, { name: 'SIZES.txt', text: sizes }]), `sticker-sheets-${files.length}.zip`);
+  } finally {
+    $('dlSheets').disabled = false;
+  }
 });
+
+$('shareSheets').addEventListener('click', async () => {
+  if (!state.stickers) return;
+  $('shareSheets').disabled = true;
+  try {
+    const { files, sizes } = await sheetFiles();
+    const shareFiles = files.map((f) => new File([f.blob], f.name, { type: 'image/png' }));
+    await navigator.share({ files: shareFiles, title: 'Sticker sheets', text: sizes });
+  } catch (e) {
+    if (e.name !== 'AbortError') toast('Sharing failed: ' + e.message, 4000);
+  } finally {
+    $('shareSheets').disabled = false;
+  }
+});
+{
+  const probe = new File([new Blob(['x'], { type: 'image/png' })], 'x.png', { type: 'image/png' });
+  if (navigator.canShare?.({ files: [probe] })) $('shareSheets').classList.remove('hidden');
+}
 
 $('dlStickers').addEventListener('click', async () => {
   if (!state.stickers) return;
   $('dlStickers').disabled = true;
   toast('Preparing stickers…');
-  const files = [];
-  const lines = ['Individual stickers (300 dpi, transparent PNG). Size in Design Space:'];
-  for (const st of state.stickers) {
-    const name = `sticker-${String(st.number).padStart(3, '0')}.png`;
-    files.push({ name, blob: await pngWithDpi(st.canvas, DPI) });
-    lines.push(`${name}: ${fmt(st.canvas.width / DPI)} × ${fmt(st.canvas.height / DPI)} in`);
+  try {
+    const files = [];
+    const lines = ['Individual stickers (300 dpi, transparent PNG). Size in Design Space:'];
+    for (const st of state.stickers) {
+      const name = `sticker-${String(st.number).padStart(3, '0')}.png`;
+      files.push({ name, blob: await pngWithDpi(st.canvas, DPI) });
+      lines.push(`${name}: ${fmt(st.canvas.width / DPI)} × ${fmt(st.canvas.height / DPI)} in`);
+    }
+    files.push({ name: 'SIZES.txt', text: lines.join('\n') + '\n' });
+    download(await zipFiles(files), `stickers-${state.stickers.length}.zip`);
+  } finally {
+    $('dlStickers').disabled = false;
   }
-  files.push({ name: 'SIZES.txt', text: lines.join('\n') + '\n' });
-  download(await zipFiles(files), `stickers-${state.stickers.length}.zip`);
-  $('dlStickers').disabled = false;
 });
 
-// ---------- init ----------
+// ---------- new project ----------
+$('newProjectBtn').addEventListener('click', async () => {
+  if (state.frames.length && !(await confirmDialog('Start a new project?', 'This removes all frames from this device. Your settings are kept.', 'Start new'))) return;
+  await clearAllFrames();
+  images = null;
+  if (video.src) { URL.revokeObjectURL(video.src); video.removeAttribute('src'); video.load(); }
+  $('fileName').textContent = '';
+  $('videoFile').value = '';
+  $('extractBtn').disabled = true;
+  $('scrubber').classList.add('hidden');
+  stopCamera();
+  setRadio('srcMode', 'upload');
+  setMode('upload');
+  go('source');
+  toast('New project started.');
+});
+
+// ---------- install (PWA) ----------
+let installEvt = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  installEvt = e;
+  $('installBtn').classList.remove('hidden');
+});
+const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+if (isIOS && !standalone) $('installBtn').classList.remove('hidden');
+$('installBtn').addEventListener('click', async () => {
+  if (installEvt) {
+    installEvt.prompt();
+    await installEvt.userChoice;
+    installEvt = null;
+    $('installBtn').classList.add('hidden');
+  } else if (isIOS) {
+    toast('In Safari, tap Share, then “Add to Home Screen”.', 5000);
+  }
+});
+window.addEventListener('appinstalled', () => { $('installBtn').classList.add('hidden'); toast('Installed! Open Sticker Stop from your home screen.'); });
+
+if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  navigator.serviceWorker.register('sw.js').catch((e) => console.warn('SW registration failed', e));
+}
+
+// ---------- restore & init ----------
+async function restore() {
+  const saved = await store.getKV('settings');
+  if (saved === undefined) {
+    // Either a first run or storage is unavailable; check which.
+    state.storageOk = 'indexedDB' in window && (await store.setKV('ping', 1)) !== undefined;
+  }
+  applySettings(saved);
+  applyPreset(false);
+  const recs = await store.getFrames();
+  for (const r of recs) {
+    const f = { id: r.id, raw: r.raw, cut: null, cutPng: r.cutPng, include: r.include, thumb: null };
+    if (r.cutPng && r.bbox) {
+      f.cut = { canvas: await blobToCanvas(r.cutPng), bbox: r.bbox, srcW: r.srcW, srcH: r.srcH };
+      f.thumb = URL.createObjectURL(r.cutPng);
+      state.srcW = r.srcW; state.srcH = r.srcH;
+    }
+    state.frames.push(f);
+    state.nextId = Math.max(state.nextId, r.id + 1);
+  }
+  if (recs.length) {
+    store.persist();
+    toast(`Welcome back. ${recs.length} frames restored.`);
+  }
+  return saved;
+}
+
 initPresets();
+const saved = await restore();
 syncMethodUI();
-updateEstimate();
+setMode(radio('srcMode') || 'upload');
 renderFrames();
-// Expose for automated testing / debugging.
-window.__stickerStop = { state, rebuildSheets, addFrame, cutSettings };
+rebuildSheets();
+go(saved?.screen && (saved.screen !== 'capture' || state.frames.length) ? saved.screen : 'source');
+$('saveState').textContent = state.storageOk ? 'Saved' : 'Not saved';
+// Exposed for automated tests / debugging.
+window.__stickerStop = { state, rebuildSheets, addFrame, cutSettings, go };

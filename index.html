@@ -2,86 +2,125 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Sticker Stop</title>
   <meta name="description" content="Turn a dance video into numbered stop-motion cutout stickers laid out for Cricut StickerPix Print + Cut." />
+  <meta name="theme-color" content="#16a34a" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="Sticker Stop" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
   <link rel="stylesheet" href="css/style.css" />
   <script src="js/vendor/jszip.min.js" defer></script>
   <script type="module" src="js/app.js"></script>
 </head>
 <body>
-  <header class="top">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-source" viewBox="0 0 24 24"><path d="M4 7h3l2-3h6l2 3h3v12H4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><circle cx="12" cy="13" r="3.5" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
+  <symbol id="i-cut" viewBox="0 0 24 24"><circle cx="6" cy="6" r="3" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="6" cy="18" r="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8.5 7.5 20 18M8.5 16.5 20 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="i-rec" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="4.5" fill="currentColor"/></symbol>
+  <symbol id="i-frames" viewBox="0 0 24 24"><rect x="3" y="3" width="7.5" height="7.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
+  <symbol id="i-sheet" viewBox="0 0 24 24"><path d="M6 2h9l5 5v15H6z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><circle cx="10" cy="11" r="2" fill="currentColor"/><circle cx="16" cy="11" r="2" fill="currentColor"/><circle cx="10" cy="17" r="2" fill="currentColor"/><circle cx="16" cy="17" r="2" fill="currentColor"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 4v11m-5-5 5 5 5-5M5 20h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+</svg>
+
+<div class="app">
+  <header class="appbar">
     <div class="brand">
-      <span class="logo" aria-hidden="true">✂</span>
-      <div>
-        <h1>Sticker Stop</h1>
-        <p class="sub">Dance video → numbered cutout stickers → ready for Cricut Print + Cut</p>
-      </div>
+      <img src="icons/icon.svg" alt="" width="34" height="34" />
+      <span class="title">Sticker Stop</span>
+    </div>
+    <span class="pill" id="saveState" title="Your project is saved on this device">Saved</span>
+    <div class="appbar-actions">
+      <button class="icon-btn ghost hidden" id="installBtn" title="Install app"><svg width="20" height="20"><use href="#i-down"/></svg><span>Install</span></button>
+      <button class="icon-btn ghost" id="newProjectBtn" title="Start a new project"><svg width="20" height="20"><use href="#i-plus"/></svg><span>New</span></button>
     </div>
   </header>
 
-  <main>
-    <!-- 1. SOURCE -->
-    <section class="card" id="sec-source">
-      <h2><span class="step">1</span> Source</h2>
-      <div class="tabs" role="tablist">
-        <button role="tab" class="tab active" data-tab="upload" aria-selected="true">Upload video</button>
-        <button role="tab" class="tab" data-tab="live" aria-selected="false">Live camera</button>
-      </div>
+  <nav class="tabbar" role="tablist" aria-label="Steps">
+    <button role="tab" data-go="source" aria-selected="true"><svg><use href="#i-source"/></svg><span>Source</span></button>
+    <button role="tab" data-go="cutout"><svg><use href="#i-cut"/></svg><span>Cutout</span></button>
+    <button role="tab" data-go="capture"><svg><use href="#i-rec"/></svg><span>Capture</span></button>
+    <button role="tab" data-go="frames"><svg><use href="#i-frames"/></svg><span>Frames</span><b class="badge hidden" id="framesBadge"></b></button>
+    <button role="tab" data-go="sheets"><svg><use href="#i-sheet"/></svg><span>Sheets</span><b class="badge hidden" id="sheetsBadge"></b></button>
+  </nav>
 
-      <div class="tabpanel" data-panel="upload">
-        <label class="file">
-          <input type="file" id="videoFile" accept="video/*,image/*" multiple />
-          <span>Choose a video (or a batch of photos)</span>
-        </label>
-        <video id="video" controls playsinline muted class="hidden"></video>
-        <div class="row hidden" id="trimRow">
-          <label>Start (s) <input type="number" id="trimStart" min="0" step="0.1" value="0" /></label>
-          <button class="ghost" id="setStart">Set to current</button>
-          <label>End (s) <input type="number" id="trimEnd" min="0" step="0.1" value="0" /></label>
-          <button class="ghost" id="setEnd">Set to current</button>
-        </div>
-      </div>
-
-      <div class="tabpanel hidden" data-panel="live">
-        <div class="row">
-          <button id="camStart">Start camera</button>
-          <select id="camSelect" aria-label="Camera"></select>
-          <label class="check"><input type="checkbox" id="mirror" checked /> Mirror</label>
-          <label class="check"><input type="checkbox" id="livePreview" checked /> Live cutout preview</label>
-        </div>
-        <video id="cam" playsinline muted class="hidden"></video>
-        <div class="row">
-          <label>Countdown (s) <input type="number" id="countdown" min="0" max="30" value="3" /></label>
-          <label>Record for (s) <input type="number" id="recordSecs" min="1" max="120" value="5" /></label>
-          <button id="recordBtn" disabled>● Record &amp; auto-cut</button>
-          <button class="ghost" id="snapBtn" disabled>Snap 1 frame</button>
-        </div>
-        <p class="hint" id="liveStatus">Camera needs https:// or localhost. Nothing leaves your device.</p>
-      </div>
-    </section>
-
-    <!-- 2. CUTOUT -->
-    <section class="card" id="sec-cutout">
-      <h2><span class="step">2</span> Cutout</h2>
-      <div class="seg" role="radiogroup" aria-label="Cutout method">
-        <label><input type="radio" name="method" value="key" checked /> <b>Green screen key</b><small>Fast &amp; crisp edges</small></label>
-        <label><input type="radio" name="method" value="ai" /> <b>AI auto</b><small>Any background</small></label>
-        <label><input type="radio" name="method" value="both" /> <b>Green screen + AI</b><small>Cleanest; ignores gear past the screen edges</small></label>
-      </div>
-
+  <main class="workspace" id="workspace">
+    <!-- Shared preview stage (Source / Cutout / Capture) -->
+    <section class="stage" id="stage" aria-label="Preview">
       <div class="previews">
         <figure>
-          <canvas id="origCanvas" width="320" height="180" title="Click to pick key colour"></canvas>
-          <figcaption>Original <span class="hint">(click to pick key colour)</span></figcaption>
+          <div class="canvas-wrap"><canvas id="origCanvas" width="320" height="180" title="Tap to pick the key colour"></canvas>
+            <div class="empty-hint" id="stageEmpty">Add a video or start the camera</div>
+          </div>
+          <figcaption>Original <span class="hint">· tap to pick key colour</span></figcaption>
         </figure>
         <figure>
-          <canvas id="cutCanvas" class="checker" width="320" height="180"></canvas>
+          <div class="canvas-wrap"><canvas id="cutCanvas" class="checker" width="320" height="180"></canvas>
+            <div class="rec-dot hidden" id="recDot">REC</div>
+          </div>
           <figcaption>Cutout</figcaption>
         </figure>
       </div>
+      <div class="scrubber hidden" id="scrubber">
+        <input type="range" id="scrub" min="0" max="1000" value="0" aria-label="Scrub video" />
+        <div class="scrub-row">
+          <span class="time" id="timeLabel">0.0 s</span>
+          <label>In <input type="number" id="trimStart" min="0" step="0.1" value="0" /></label>
+          <button class="ghost small" id="setStart">Set in</button>
+          <label>Out <input type="number" id="trimEnd" min="0" step="0.1" value="0" /></label>
+          <button class="ghost small" id="setEnd">Set out</button>
+        </div>
+      </div>
+      <video id="video" playsinline muted preload="auto" class="hidden"></video>
+      <video id="cam" playsinline muted class="hidden"></video>
+    </section>
 
-      <div class="grid" id="keyControls">
+    <!-- 1. SOURCE -->
+    <section class="screen" data-screen="source">
+      <h2>Where's the dance coming from?</h2>
+      <div class="seg two" role="radiogroup" aria-label="Source">
+        <label><input type="radio" name="srcMode" value="upload" checked /> <b>Video or photos</b><small>From your camera roll or computer</small></label>
+        <label><input type="radio" name="srcMode" value="live" /> <b>Live camera</b><small>Record now, auto-cut as you dance</small></label>
+      </div>
+
+      <div data-mode="upload">
+        <label class="dropzone" id="dropzone">
+          <input type="file" id="videoFile" accept="video/*,image/*" multiple />
+          <svg width="28" height="28"><use href="#i-down"/></svg>
+          <b>Choose a video</b>
+          <span>or drop it here · a batch of photos works too</span>
+          <span class="filename" id="fileName"></span>
+        </label>
+      </div>
+
+      <div data-mode="live" class="hidden">
+        <div class="row">
+          <button id="camStart">Start camera</button>
+          <select id="camSelect" aria-label="Camera"></select>
+        </div>
+        <div class="row">
+          <label class="check"><input type="checkbox" id="mirror" checked /> Mirror</label>
+          <label class="check"><input type="checkbox" id="livePreview" checked /> Live cutout preview</label>
+        </div>
+        <p class="hint" id="liveStatus">Prop your phone on a tripod and fit your whole body in the frame. Nothing leaves your device.</p>
+      </div>
+      <div class="next"><button data-go="cutout">Next: tune the cutout →</button></div>
+    </section>
+
+    <!-- 2. CUTOUT -->
+    <section class="screen hidden" data-screen="cutout">
+      <h2>Cut yourself out</h2>
+      <div class="seg" role="radiogroup" aria-label="Cutout method">
+        <label><input type="radio" name="method" value="key" checked /> <b>Green screen</b><small>Fast &amp; crisp edges</small></label>
+        <label><input type="radio" name="method" value="ai" /> <b>AI auto</b><small>Any background</small></label>
+        <label><input type="radio" name="method" value="both" /> <b>Green screen + AI</b><small>Cleanest result</small></label>
+      </div>
+      <div id="keyControls">
         <div class="ctl">
           <label for="keyColor">Key colour</label>
           <div class="row tight">
@@ -93,140 +132,176 @@
         <div class="ctl"><label>Edge softness <output for="softness">25</output></label><input type="range" id="softness" min="0" max="100" value="25" /></div>
         <div class="ctl"><label>Green spill removal <output for="spill">70</output></label><input type="range" id="spill" min="0" max="100" value="70" /></div>
       </div>
-      <div class="grid">
-        <div class="ctl"><label>Edge choke (px) <output for="choke">1</output></label><input type="range" id="choke" min="0" max="8" value="1" /></div>
-        <div class="ctl">
-          <label for="procRes">Processing resolution</label>
-          <select id="procRes">
-            <option value="720">720p (faster)</option>
-            <option value="1080" selected>1080p (sharper stickers)</option>
-          </select>
-        </div>
-        <label class="check"><input type="checkbox" id="cleanSpecks" checked /> Remove stray specks</label>
+      <div class="ctl"><label>Edge choke (px) <output for="choke">1</output></label><input type="range" id="choke" min="0" max="8" value="1" /></div>
+      <div class="ctl">
+        <label for="procRes">Processing resolution</label>
+        <select id="procRes">
+          <option value="720">720p (faster)</option>
+          <option value="1080" selected>1080p (sharper stickers)</option>
+        </select>
       </div>
+      <label class="check"><input type="checkbox" id="cleanSpecks" checked /> Remove stray specks</label>
       <p class="hint" id="aiStatus"></p>
+      <div class="next"><button data-go="capture">Next: capture frames →</button></div>
     </section>
 
-    <!-- 3. FRAME RATE -->
-    <section class="card" id="sec-rate">
-      <h2><span class="step">3</span> How many frames?</h2>
+    <!-- 3. CAPTURE -->
+    <section class="screen hidden" data-screen="capture">
+      <h2>How smooth?</h2>
       <div class="ctl">
         <label for="fps">Stickers per second of dance</label>
         <select id="fps">
-          <option value="6">6 fps — choppy / deliberate stop-motion look</option>
-          <option value="8">8 fps — minimum that still reads as motion ("on threes")</option>
+          <option value="6">6 fps — choppy, deliberate stop-motion look</option>
+          <option value="8">8 fps — minimum that still reads as motion</option>
           <option value="10">10 fps — good for slower moves</option>
-          <option value="12" selected>12 fps — recommended sweet spot ("on twos")</option>
-          <option value="15">15 fps — smooth (brickfilm standard)</option>
-          <option value="24">24 fps — very smooth, lots of stickers ("on ones")</option>
+          <option value="12" selected>12 fps — recommended ("on twos")</option>
+          <option value="15">15 fps — smooth</option>
+          <option value="24">24 fps — very smooth, lots of stickers</option>
         </select>
       </div>
-      <p class="hint">Most hand-made stop motion is shot at 12 fps: each photo is held for two frames of 24 fps video. 8 fps is about the lowest that still reads as dancing. Fast moves need more frames than slow ones.</p>
-      <div class="estimate" id="estimate">Load a video to see how many stickers it makes.</div>
-      <div class="row">
-        <button id="extractBtn" disabled>Extract &amp; cut out frames</button>
-        <button class="ghost hidden" id="cancelBtn">Cancel</button>
-        <progress id="progress" class="hidden" max="1" value="0"></progress>
+      <p class="hint">Hand-made stop motion is usually 12 fps: each photo is held for two frames of 24 fps video. 8 fps is about the lowest that still reads as dancing.</p>
+      <div class="estimate" id="estimate">Add a video to see how many stickers it makes.</div>
+
+      <div data-mode="upload">
+        <div class="row">
+          <button id="extractBtn" class="big" disabled>Extract &amp; cut out frames</button>
+        </div>
       </div>
+      <div data-mode="live" class="hidden">
+        <div class="row">
+          <label>Countdown <input type="number" id="countdown" min="0" max="30" value="3" /> s</label>
+          <label>Record for <input type="number" id="recordSecs" min="1" max="120" value="5" /> s</label>
+        </div>
+        <div class="row">
+          <button id="recordBtn" class="big rec" disabled>● Record &amp; auto-cut</button>
+          <button class="ghost" id="snapBtn" disabled>Snap 1 frame</button>
+        </div>
+      </div>
+      <div class="row progress-row hidden" id="progressRow">
+        <progress id="progress" max="1" value="0"></progress>
+        <span class="hint" id="progressLabel"></span>
+        <button class="ghost small" id="cancelBtn">Cancel</button>
+      </div>
+      <div class="next"><button data-go="frames">Next: review frames →</button></div>
     </section>
 
     <!-- 4. FRAMES -->
-    <section class="card" id="sec-frames">
-      <h2><span class="step">4</span> Frames <span class="count" id="frameCount"></span></h2>
-      <p class="hint">Click a frame to skip it. Numbers are the order you'll stick them down in.</p>
-      <div class="row">
-        <button class="ghost" id="reprocessBtn" disabled>Re-cut all with current settings</button>
-        <button class="ghost" id="includeAllBtn" disabled>Include all</button>
-        <button class="ghost danger" id="clearBtn" disabled>Clear frames</button>
-      </div>
-      <div class="frames" id="frames"></div>
-      <div class="player">
-        <canvas id="playCanvas" class="checker" width="320" height="180"></canvas>
-        <div class="row">
-          <button id="playBtn" disabled>▶ Play</button>
-          <label>Background
-            <select id="playBg">
+    <section class="screen hidden" data-screen="frames">
+      <div class="split">
+        <div class="player">
+          <canvas id="playCanvas" class="checker" width="320" height="180"></canvas>
+          <div class="row">
+            <button id="playBtn" disabled>▶ Play</button>
+            <select id="playBg" aria-label="Preview background">
               <option value="checker">Checkerboard</option>
               <option value="#ffffff">White</option>
               <option value="#111111">Black</option>
               <option value="#ffd23f">Yellow</option>
             </select>
-          </label>
-          <button class="ghost" id="webmBtn" disabled>Save preview video</button>
-        </div>
-      </div>
-    </section>
-
-    <!-- 5. STICKER SHEETS -->
-    <section class="card" id="sec-sheets">
-      <h2><span class="step">5</span> Sticker sheets</h2>
-      <div class="grid">
-        <div class="ctl wide">
-          <label for="preset">Machine &amp; paper</label>
-          <select id="preset"></select>
-          <p class="hint" id="presetNote"></p>
-        </div>
-        <div class="ctl hidden" id="customSize">
-          <label>Printable area W × H (in)</label>
-          <div class="row tight">
-            <input type="number" id="customW" step="0.01" value="4" /> ×
-            <input type="number" id="customH" step="0.01" value="6" />
+            <button class="ghost" id="webmBtn" disabled>Save video</button>
           </div>
         </div>
-        <div class="ctl">
-          <label for="orientation">Orientation</label>
-          <select id="orientation">
-            <option value="auto">Auto (fit the most)</option>
-            <option value="portrait">Portrait</option>
-            <option value="landscape">Landscape</option>
-          </select>
+        <div class="gallery">
+          <h2>Frames <span class="count" id="frameCount"></span></h2>
+          <p class="hint">Tap a frame to skip it. The number is the order you'll stick them down in.</p>
+          <div class="row">
+            <button class="ghost small" id="reprocessBtn" disabled>Re-cut all</button>
+            <button class="ghost small" id="includeAllBtn" disabled>Include all</button>
+            <button class="ghost small" id="everyOtherBtn" disabled>Halve frames</button>
+            <button class="ghost small danger" id="clearBtn" disabled>Clear</button>
+          </div>
+          <div class="frames" id="frames"><p class="empty">No frames yet. Go to <b>Capture</b> to make some.</p></div>
         </div>
-        <div class="ctl"><label for="figureH">Dancer height (in)</label><input type="number" id="figureH" min="0.3" max="9" step="0.05" value="1.5" /></div>
-        <div class="ctl"><label for="borderW">White border (in)</label><input type="number" id="borderW" min="0" max="0.5" step="0.01" value="0.06" /></div>
-        <div class="ctl"><label for="gap">Space between stickers (in)</label><input type="number" id="gap" min="0.02" max="0.5" step="0.01" value="0.06" /></div>
-        <div class="ctl"><label for="margin">Sheet margin (in)</label><input type="number" id="margin" min="0" max="1" step="0.01" value="0.12" /></div>
-        <div class="ctl"><label for="borderColor">Border colour</label><input type="color" id="borderColor" value="#ffffff" /></div>
-        <label class="check"><input type="checkbox" id="fillHoles" checked /> Fill gaps (between arms/legs) for a sturdier sticker</label>
       </div>
-      <fieldset class="grid">
-        <legend>Frame number badge</legend>
-        <label class="check"><input type="checkbox" id="badgeShow" checked /> Show number</label>
-        <div class="ctl">
-          <label for="badgeCorner">Corner</label>
-          <select id="badgeCorner">
-            <option value="bottom-left">Bottom left</option>
-            <option value="bottom-right">Bottom right</option>
-            <option value="top-left">Top left</option>
-            <option value="top-right">Top right</option>
-          </select>
-        </div>
-        <div class="ctl"><label for="badgeSize">Badge size (in)</label><input type="number" id="badgeSize" min="0.08" max="0.6" step="0.01" value="0.14" /></div>
-        <div class="ctl"><label for="badgeColor">Badge colour</label><input type="color" id="badgeColor" value="#1d1d1f" /></div>
-      </fieldset>
-
-      <div class="stats" id="stats">No frames yet.</div>
-      <div class="sheets" id="sheets"></div>
-      <div class="row">
-        <button id="dlSheets" disabled>Download print-ready sheets (.zip)</button>
-        <button class="ghost" id="dlStickers" disabled>Download individual stickers (.zip)</button>
-      </div>
+      <div class="next"><button data-go="sheets">Next: sticker sheets →</button></div>
     </section>
 
-    <!-- 6. HOW TO PRINT -->
-    <section class="card" id="sec-howto">
-      <h2><span class="step">6</span> Print &amp; cut with Cricut</h2>
-      <ol class="howto">
-        <li>Unzip the download. Each <code>sheet-NN_…png</code> is a 300&nbsp;dpi PNG with a transparent background, exactly the size of the printable area.</li>
-        <li>Open <b>Cricut Design Space</b> → New project → select your StickerPix machine (or set the canvas to your Print Then Cut machine).</li>
-        <li><b>Upload</b> → pick a sheet PNG → choose <b>Print Then Cut image</b>. The transparent background tells Cricut where to cut. Each sticker becomes its own kiss-cut shape.</li>
-        <li>Check the size matches the one in <code>SIZES.txt</code>. Design Space trims empty edges on upload, so use the "sticker area" size it lists. Lock the proportions.</li>
-        <li><b>Make it</b> → load the sticker sheet → print + cut. Repeat for each sheet.</li>
-        <li>Peel the stickers off in number order and stick them down, one photo per sticker, to animate.</li>
-      </ol>
-      <p class="hint">Tip: for the cleanest key, light the green screen evenly, don't wear green, and stand a few feet in front of it to cut down shadows and spill.</p>
+    <!-- 5. SHEETS -->
+    <section class="screen hidden" data-screen="sheets">
+      <div class="split">
+        <div class="sheet-settings">
+          <h2>Sticker sheets</h2>
+          <div class="ctl">
+            <label for="preset">Machine &amp; paper</label>
+            <select id="preset"></select>
+            <p class="hint" id="presetNote"></p>
+          </div>
+          <div class="ctl hidden" id="customSize">
+            <label>Printable area W × H (in)</label>
+            <div class="row tight">
+              <input type="number" id="customW" step="0.01" value="4" /> ×
+              <input type="number" id="customH" step="0.01" value="6" />
+            </div>
+          </div>
+          <div class="grid2">
+            <div class="ctl">
+              <label for="orientation">Orientation</label>
+              <select id="orientation">
+                <option value="auto">Auto (fit most)</option>
+                <option value="portrait">Portrait</option>
+                <option value="landscape">Landscape</option>
+              </select>
+            </div>
+            <div class="ctl"><label for="figureH">Dancer height (in)</label><input type="number" id="figureH" min="0.3" max="9" step="0.05" value="1.5" /></div>
+            <div class="ctl"><label for="borderW">White border (in)</label><input type="number" id="borderW" min="0" max="0.5" step="0.01" value="0.06" /></div>
+            <div class="ctl"><label for="gap">Spacing (in)</label><input type="number" id="gap" min="0.02" max="0.5" step="0.01" value="0.06" /></div>
+            <div class="ctl"><label for="margin">Sheet margin (in)</label><input type="number" id="margin" min="0" max="1" step="0.01" value="0.12" /></div>
+            <div class="ctl"><label for="borderColor">Border colour</label><input type="color" id="borderColor" value="#ffffff" /></div>
+          </div>
+          <label class="check"><input type="checkbox" id="fillHoles" checked /> Fill gaps between arms &amp; legs (sturdier)</label>
+          <details class="group" open>
+            <summary>Frame number badge</summary>
+            <label class="check"><input type="checkbox" id="badgeShow" checked /> Show number</label>
+            <div class="grid2">
+              <div class="ctl">
+                <label for="badgeCorner">Corner</label>
+                <select id="badgeCorner">
+                  <option value="bottom-left">Bottom left</option>
+                  <option value="bottom-right">Bottom right</option>
+                  <option value="top-left">Top left</option>
+                  <option value="top-right">Top right</option>
+                </select>
+              </div>
+              <div class="ctl"><label for="badgeSize">Size (in)</label><input type="number" id="badgeSize" min="0.08" max="0.6" step="0.01" value="0.14" /></div>
+              <div class="ctl"><label for="badgeColor">Colour</label><input type="color" id="badgeColor" value="#1d1d1f" /></div>
+            </div>
+          </details>
+        </div>
+        <div class="sheet-output">
+          <div class="stats" id="stats">No frames yet.</div>
+          <div class="sheets" id="sheets"></div>
+          <div class="row">
+            <button id="dlSheets" class="big" disabled>Download print-ready sheets</button>
+            <button class="ghost hidden" id="shareSheets" disabled>Share to Design Space…</button>
+            <button class="ghost" id="dlStickers" disabled>Individual stickers</button>
+          </div>
+          <details class="group howto">
+            <summary>How to print &amp; cut with Cricut</summary>
+            <ol>
+              <li>Each <code>sheet-NN_…png</code> is a 300&nbsp;dpi PNG with a transparent background, sized exactly to the printable area.</li>
+              <li>In <b>Cricut Design Space</b>, start a new project for your StickerPix (or Print Then Cut) machine.</li>
+              <li><b>Upload</b> → pick a sheet PNG → <b>Print Then Cut image</b>. The transparent background tells Cricut to cut around each sticker.</li>
+              <li>Lock the proportions and set the size from <code>SIZES.txt</code>. Design Space trims empty edges, so use the "sticker area" size.</li>
+              <li><b>Make it</b> → print + cut. Repeat for each sheet, then peel and stick in number order.</li>
+            </ol>
+            <p class="hint">On a phone, <b>Share to Design Space</b> sends the sheets straight to the Cricut app, or saves them to Photos/Files.</p>
+          </details>
+        </div>
+      </div>
     </section>
   </main>
+</div>
 
-  <div id="toast" role="status" aria-live="polite"></div>
+<dialog id="confirmDlg">
+  <form method="dialog">
+    <h3 id="confirmTitle">Start a new project?</h3>
+    <p id="confirmText">This removes all frames from this device.</p>
+    <div class="row end">
+      <button value="cancel" class="ghost">Cancel</button>
+      <button value="ok" class="danger-fill" id="confirmOk">Delete</button>
+    </div>
+  </form>
+</dialog>
+<div id="toast" role="status" aria-live="polite"></div>
 </body>
 </html>

@@ -56,20 +56,32 @@ also a *Custom* preset.
 - **15 fps** is common among brickfilmers and is noticeably smoother. **24 fps** is fully smooth but doubles the sticker count.
 - Rule of thumb: **stickers = seconds of dance × fps.** A 5-second dance at 12 fps is 60 stickers, or about 5–6 StickerPix sheets.
 
-## Run it
+## Install it as an app
 
-It's a static site with no build step. ES modules and the camera need `http(s)://`, not `file://`:
+Sticker Stop is a **Progressive Web App**. Once it's hosted, you can install it like a normal app:
 
+- **iPhone / iPad (Safari):** Share → **Add to Home Screen**
+- **Android (Chrome):** tap **Install** in the app bar (or ⋮ → Install app)
+- **Mac / Windows (Chrome, Edge):** click **Install** in the app bar, or use the install icon in the address bar
+
+When installed, it:
+- runs full-screen with its own icon, one screen per step, and a bottom tab bar on phones
+- **works offline**. The AI model is cached after its first use, so AI mode works offline after that too
+- **auto-saves your project** (frames + settings) on the device, so you can close it and carry on later
+- can **Share** sheets straight to the Cricut Design Space app or Photos/Files on a phone
+- keeps the screen awake while recording
+
+### Hosting (one-time)
+The camera and installing both need HTTPS. The easiest option is **GitHub Pages**: repo Settings → Pages → *Deploy from a
+branch* → pick this branch and `/ (root)`. Your app will be at `https://<user>.github.io/sticker-stop/`. Open
+that link on your phone and install it.
+
+Any static host works too (Netlify, Vercel, Cloudflare Pages). There's no build step.
+
+### Local development
 ```bash
-python3 -m http.server 8000
-# open http://localhost:8000
+python3 -m http.server 8000   # then open http://localhost:8000
 ```
-
-To use it on your phone, enable **GitHub Pages** for this repo (Settings → Pages → deploy from branch). The
-camera needs HTTPS, which Pages provides.
-
-The green-screen path works fully offline. AI mode downloads its model (~16 MB) from Google/jsDelivr the
-first time.
 
 ## Printing with Cricut Design Space
 
@@ -90,9 +102,11 @@ Prefer to arrange the stickers yourself? **Download individual stickers** gives 
 
 ## Files
 ```
-index.html         UI
-css/style.css      styles (light/dark)
-js/app.js          app wiring: sources, capture, gallery, sheets, downloads
+index.html         app shell (5 screens + tab bar)
+manifest.webmanifest, sw.js, icons/   installable PWA + offline cache
+css/style.css      styles (light/dark, phone + desktop)
+js/app.js          app wiring: navigation, sources, capture, gallery, sheets, export, install
+js/store.js        on-device project storage (IndexedDB)
 js/keyer.js        chroma key + spill suppression + backdrop auto-detect
 js/segmenter.js    MediaPipe person segmentation (lazy-loaded)
 js/processor.js    frame → cropped transparent cutout
