@@ -88,9 +88,10 @@ python3 -m http.server 8000   # then open http://localhost:8000
 1. **Download print-ready sheets.** Unzip it to get `sheet-NN_frames-A-B_WxHin.png` files plus `SIZES.txt`.
 2. Design Space → New project → choose your StickerPix (or Print Then Cut) machine.
 3. **Upload** → choose the sheet PNG → **Print Then Cut image**.
-4. Lock proportions and set the size from `SIZES.txt`. Design Space trims the transparent edges on upload, so use
+4. Set Design Space's sticker border to **None/Thin**. The files already have their own white border, and a thick one joins neighbouring stickers together.
+5. Lock proportions and set the size from `SIZES.txt`. Design Space trims the transparent edges on upload, so use
    the **sticker area** size listed.
-5. **Make It** → print → cut. Peel the stickers in number order.
+6. **Make It** → print → cut. Peel the stickers in number order.
 
 Prefer to arrange the stickers yourself? **Download individual stickers** gives one PNG per frame, with sizes listed.
 

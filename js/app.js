@@ -1060,6 +1060,8 @@ async function sheetFiles() {
     '',
     'In Design Space: Upload → Print Then Cut image → lock proportions → set the size below.',
     'If Design Space trims the empty edges on upload, use the "sticker area" size.',
+    'Set the Design Space sticker border to None/Thin: these files already have their white border.',
+    'A thick border there joins neighbouring stickers into one big sticker.',
     '',
   ];
   for (let i = 0; i < built.layout.sheets.length; i++) {
